@@ -157,8 +157,10 @@ def quiz_to_dict(pair: tuple[Question, QuestionContent]) -> dict[str, Any]:
 # These are the transport-agnostic core; build_server only wraps them with a
 # typed signature so the SDK can derive each tool's JSON input schema.
 # --------------------------------------------------------------------------- #
-def _call_next(service: CurriculumService, course: str) -> dict[str, Any]:
-    return next_result_to_dict(service.next_action(course))
+def _call_next(
+    service: CurriculumService, course: str, focus: str | None = None
+) -> dict[str, Any]:
+    return next_result_to_dict(service.next_action(course, focus=focus))
 
 
 def _call_explain(service: CurriculumService, concept_id: str) -> dict[str, Any]:
@@ -226,11 +228,14 @@ def build_server(service: CurriculumService) -> Any:
         description=(
             "Decide the single best next action for a course (teach/review/"
             "test) and return it with the ranked candidate field and the "
-            "sampling temperature."
+            "sampling temperature. Optional 'focus' scopes the choice to one "
+            "topic/module: comma/space-separated substrings matched against "
+            "concept ids and source tokens (e.g. 'crypto', 'cyber-03', 'm2'). "
+            "Call 'state' to see the available topics."
         ),
     )
-    def next_tool(course: str):  # noqa: ANN202 - schema is derived from params
-        return _call_next(service, course)
+    def next_tool(course: str, focus: str | None = None):  # noqa: ANN202 - schema is derived from params
+        return _call_next(service, course, focus)
 
     @server.tool(
         name="explain",

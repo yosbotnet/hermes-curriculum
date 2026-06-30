@@ -14,8 +14,13 @@ from ..domain.entities import ConceptContent, NextResult, Question, QuestionCont
 
 class CurriculumService(ABC):
     @abstractmethod
-    def next_action(self, course: str) -> NextResult:
-        """Decide the single best next thing to do, plus the ranked field."""
+    def next_action(self, course: str, *, focus: str | None = None) -> NextResult:
+        """Decide the single best next thing to do, plus the ranked field.
+
+        ``focus`` (optional) scopes the candidate pool to concepts whose id or
+        source token matches any of its comma/space-separated terms (e.g.
+        "crypto", "cyber-03", or "m2"), so a learner can settle one topic at a
+        time instead of the engine roaming the whole graph."""
 
     @abstractmethod
     def explain(self, concept_id: str) -> ConceptContent:

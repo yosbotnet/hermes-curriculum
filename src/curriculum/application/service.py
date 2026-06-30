@@ -15,6 +15,7 @@ Responsibilities (each kept to a clear method):
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from datetime import datetime
 from typing import Any, Callable, Mapping, Sequence
 
@@ -32,7 +33,13 @@ from ..domain.entities import (
     ReviewEvent,
 )
 from ..domain.enums import EdgeType, Mastery, NextMode
-from ..domain.errors import ConceptNotFound, ConfigError, ContentNotFound, QuestionNotFound
+from ..domain.errors import (
+    ConceptNotFound,
+    ConfigError,
+    ContentNotFound,
+    NoCandidatesAvailable,
+    QuestionNotFound,
+)
 from ..domain.events import GradeRecorded
 from ..ports.repositories import (
     ConceptIndexRepository,
@@ -140,17 +147,18 @@ class CurriculumApplicationService(CurriculumService):
         )
 
     def _build_candidates(
-        self, course: str, profile: CourseProfile, now: datetime
+        self, course: str, profile: CourseProfile, now: datetime, focus: str | None = None
     ) -> list[CandidateContext]:
         days = self._days_to_exam(profile, now)
         last = self._last_cluster.get(course)
+        terms = self._focus_terms(focus)
         out: list[CandidateContext] = []
         seen: set[tuple[str, NextMode]] = set()
 
         # 1. due reviews
         for st in self._states.due(course, now):
             c = self._concepts.get(st.concept_id)
-            if c is None:
+            if c is None or not self._in_focus(c, terms):
                 continue
             r = self._scheduler.retrievability(st, now)
             out.append(
@@ -163,7 +171,11 @@ class CurriculumApplicationService(CurriculumService):
 
         # 2. learnable fringe (never-seen concepts whose prerequisites are mastered)
         for c in self._concepts.list_by_course(course):
-            if self._states.get(c.id) is None and self._prereqs_satisfied(c.id):
+            if (
+                self._states.get(c.id) is None
+                and self._in_focus(c, terms)
+                and self._prereqs_satisfied(c.id)
+            ):
                 out.append(
                     self._candidate(
                         c, NextMode.TEACH, None, profile=profile, now=now,
@@ -176,7 +188,7 @@ class CurriculumApplicationService(CurriculumService):
         for e in self._edges.list_by_course(course):
             if e.skip_count >= self._skip_threshold and (e.src, NextMode.TEST) not in seen:
                 c = self._concepts.get(e.src)
-                if c is None:
+                if c is None or not self._in_focus(c, terms):
                     continue
                 out.append(
                     self._candidate(
@@ -186,6 +198,25 @@ class CurriculumApplicationService(CurriculumService):
                 )
                 seen.add((e.src, NextMode.TEST))
         return out
+
+    @staticmethod
+    def _focus_terms(focus: str | None) -> list[str]:
+        """Lowercase match terms parsed from a focus string (comma/space separated)."""
+        if not focus:
+            return []
+        return [t for t in re.split(r"[,\s]+", focus.lower()) if t]
+
+    @staticmethod
+    def _in_focus(concept: Concept, terms: Sequence[str]) -> bool:
+        """In scope if no focus is set, or any term is a substring of the concept
+        id or one of its source-file tokens -- so 'crypto', 'cyber-03' or 'm2' all
+        scope to the right material without needing a separate module schema."""
+        if not terms:
+            return True
+        hay = concept.id.lower() + " " + " ".join(
+            (sr.file or "").lower() for sr in concept.source_refs
+        )
+        return any(t in hay for t in terms)
 
     def _pick_question(self, action: NextAction, candidates: Sequence[CandidateContext]) -> str | None:
         if action.mode is NextMode.TEACH:
@@ -203,10 +234,16 @@ class CurriculumApplicationService(CurriculumService):
         return qs[0].id if qs else None
 
     # ------------------------------------------------------------- use-cases
-    def next_action(self, course: str) -> NextResult:
+    def next_action(self, course: str, *, focus: str | None = None) -> NextResult:
         profile, config = self._engine(course)
         now = self._clock.now()
-        candidates = self._build_candidates(course, profile, now)
+        candidates = self._build_candidates(course, profile, now, focus=focus)
+        if not candidates:
+            raise NoCandidatesAvailable(
+                f"no concepts match focus {focus!r}"
+                if focus
+                else "nothing is due or learnable yet"
+            )
         result = self._selection.select(candidates, config=config, now=now)
         qid = self._pick_question(result.chosen, candidates)
         chosen = replace(result.chosen, question_id=qid) if qid else result.chosen
@@ -309,9 +346,14 @@ class CurriculumApplicationService(CurriculumService):
             st = states.get(c.id)
             counts[(st.mastery if st else Mastery.NEW).value] += 1
         due_now = sum(1 for s in self._states.due(course, now))
+        topics: dict[str, int] = {}
+        for c in concepts:
+            tok = c.source_refs[0].file if c.source_refs else "(none)"
+            topics[tok] = topics.get(tok, 0) + 1
         return {
             "course": course,
             "total": len(concepts),
             "by_mastery": counts,
             "due_now": due_now,
+            "topics": dict(sorted(topics.items())),
         }

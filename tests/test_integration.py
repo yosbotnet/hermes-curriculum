@@ -130,6 +130,22 @@ class FullStackTests(unittest.TestCase):
         self.assertEqual(snap["by_mastery"]["solid"], 1)
         self.assertEqual(snap["by_mastery"]["new"], 2)
 
+    def test_focus_scopes_next_to_matching_concepts(self) -> None:
+        result = self.stack.service.next_action(COURSE, focus="confidentiality")
+        self.assertEqual(result.chosen.concept_id, "cyber/confidentiality")
+        # every candidate offered is in scope
+        self.assertTrue(all("confidentiality" in c.concept_id for c in result.candidates))
+
+    def test_focus_with_no_match_raises(self) -> None:
+        from curriculum.domain.errors import NoCandidatesAvailable
+
+        with self.assertRaises(NoCandidatesAvailable):
+            self.stack.service.next_action(COURSE, focus="no-such-topic")
+
+    def test_state_lists_topics(self) -> None:
+        # all three fixture concepts cite the same source token
+        self.assertEqual(self.stack.service.state(COURSE)["topics"], {"lessons/cyber.md": 3})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,7 +44,7 @@ class _StubService(CurriculumService):
     def __init__(self) -> None:
         self.calls: list[tuple] = []
 
-    def next_action(self, course: str) -> NextResult:
+    def next_action(self, course: str, *, focus: str | None = None) -> NextResult:
         self.calls.append(("next_action", course))
         return NextResult(
             chosen=NextAction(
