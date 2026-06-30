@@ -16,3 +16,6 @@ bundle/
 # The user's own manifest (copied from corpus.example.json, points at their files).
 # The example template stays tracked; the real corpus.json does not.
 /corpus.json
+
+# Local dev/one-off scripts (superseded by the CLI; kept local, not published).
+scripts/
