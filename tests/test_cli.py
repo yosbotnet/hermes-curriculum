@@ -24,6 +24,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from curriculum import cli
+from curriculum.config import Settings
 
 
 class HelpAndUsageTest(unittest.TestCase):
@@ -70,7 +71,7 @@ class DoctorTest(unittest.TestCase):
         # Every probe is reported, each line marked OK or MISS.
         self.assertIn("docker", printed)
         self.assertIn("database", printed)
-        self.assertIn("nous_api_key", printed)
+        self.assertIn("curriculum_api_key", printed)
         self.assertTrue("ok" in printed or "miss" in printed)
 
     def test_doctor_returns_nonzero_when_a_check_misses(self) -> None:
@@ -82,6 +83,33 @@ class DoctorTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 code = cli.main(["doctor"])
         self.assertNotEqual(code, 0)
+
+
+class McpRegisterCommandTest(unittest.TestCase):
+    def test_register_command_uses_generic_provider_env_names(self) -> None:
+        settings = Settings(api_key="secret", base_url="https://vendor.test/v1")
+        argv = cli._register_argv("/python", settings, "secret")
+
+        self.assertIn("CURRICULUM_API_KEY=secret", argv)
+        self.assertIn("CURRICULUM_BASE_URL=https://vendor.test/v1", argv)
+        self.assertIn("CURRICULUM_INGEST_MODEL=deepseek/deepseek-v4-flash", argv)
+        self.assertIn("CURRICULUM_EMBED_MODEL=google/gemini-embedding-2", argv)
+        self.assertIn("CURRICULUM_EMBED_DIM=3072", argv)
+        self.assertNotIn("NOUS_API_KEY=secret", argv)
+
+    def test_render_keeps_generic_key_as_shell_reference(self) -> None:
+        rendered = cli._render(
+            [
+                "hermes",
+                "mcp",
+                "add",
+                "curriculum",
+                "--env",
+                "CURRICULUM_API_KEY=",
+            ]
+        )
+
+        self.assertIn('CURRICULUM_API_KEY="$CURRICULUM_API_KEY"', rendered)
 
 
 if __name__ == "__main__":

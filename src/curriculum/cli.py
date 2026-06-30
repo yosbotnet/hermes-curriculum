@@ -203,9 +203,13 @@ def _register_argv(python: str, settings: Settings, key_value: str) -> list[str]
         "hermes", "mcp", "add", "curriculum",
         "--command", python,
         "--env",
-        f"NOUS_API_KEY={key_value}",
+        f"CURRICULUM_API_KEY={key_value}",
+        f"CURRICULUM_BASE_URL={settings.base_url}",
         f"CURRICULUM_DB_URL={settings.database_url}",
         f"CURRICULUM_OKF_PATH={bundle}",
+        f"CURRICULUM_INGEST_MODEL={settings.ingest_model}",
+        f"CURRICULUM_EMBED_MODEL={settings.embed_model}",
+        f"CURRICULUM_EMBED_DIM={settings.embedding_dim}",
         "--args", "-m", "curriculum.mcp.server",
     ]
 
@@ -220,8 +224,8 @@ def _render(argv: list[str]) -> str:
     """
     parts: list[str] = []
     for token in argv:
-        if token.startswith("NOUS_API_KEY="):
-            parts.append('NOUS_API_KEY="$NOUS_API_KEY"')
+        if token.startswith("CURRICULUM_API_KEY="):
+            parts.append('CURRICULUM_API_KEY="$CURRICULUM_API_KEY"')
         else:
             parts.append(shlex.quote(token))
     return " ".join(parts)
@@ -244,7 +248,7 @@ def _cmd_mcp_register(args: argparse.Namespace, settings: Settings) -> int:
         return 0
     print(f"running: {printable}")
     result = subprocess.run(
-        _register_argv(python, settings, settings.nous_api_key or "")
+        _register_argv(python, settings, settings.api_key or "")
     )
     return result.returncode
 
@@ -288,11 +292,15 @@ def _check_db(settings: Settings) -> tuple[str, bool, str]:
     return ("database", True, settings.database_url)
 
 
-def _check_nous(settings: Settings) -> tuple[str, bool, str]:
-    """Is the Nous API key set (required by every inference-backed build stage)?"""
-    if settings.nous_api_key:
-        return ("NOUS_API_KEY", True, "set")
-    return ("NOUS_API_KEY", False, "not set (export NOUS_API_KEY)")
+def _check_api_key(settings: Settings) -> tuple[str, bool, str]:
+    """Is an OpenAI-compatible provider API key set?"""
+    if settings.api_key:
+        return ("CURRICULUM_API_KEY", True, "set")
+    return (
+        "CURRICULUM_API_KEY",
+        False,
+        "not set (export CURRICULUM_API_KEY; legacy NOUS_API_KEY also works)",
+    )
 
 
 def _check_bundle(settings: Settings) -> tuple[str, bool, str]:
@@ -317,7 +325,7 @@ def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     checks = [
         _check_docker(),
         _check_db(settings),
-        _check_nous(settings),
+        _check_api_key(settings),
         _check_bundle(settings),
     ]
     all_ok = True
