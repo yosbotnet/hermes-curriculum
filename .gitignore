@@ -1,0 +1,18 @@
+# Python virtualenv + caches
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Secrets / local environment
+.env
+
+# Generated content + data (never committed: user supplies their own materials).
+# The OKF markdown bundle and any per-source ingest result dumps are build output.
+bundle/
+*_ingest_results
+
+# The user's own manifest (copied from corpus.example.json, points at their files).
+# The example template stays tracked; the real corpus.json does not.
+/corpus.json

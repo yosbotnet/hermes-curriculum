@@ -1,0 +1,10 @@
+{
+  "_comment": "Manifest describing one course's source materials to ingest. Copy to corpus.json, point paths at YOUR own materials (plain-text extracts of slides/notes), and run: curriculum build corpus.json. Paths may be absolute or relative to the working directory. token is a short stable id used as the grounding citation for that source.",
+  "course": "YourCourse",
+  "chunk_lines": 150,
+  "sources": [
+    { "path": "materials/lecture-01-intro.txt", "token": "lecture-01-intro" },
+    { "path": "materials/lecture-02-core.txt", "token": "lecture-02-core" },
+    { "path": "materials/tutorial-01.txt", "token": "tutorial-01" }
+  ]
+}

@@ -1,0 +1,25 @@
+# Postgres + pgvector for the curriculum layer.
+# Port 5433 on the host to avoid clashing with any existing 5432 Postgres.
+# schema/ is mounted into the init dir, so 001_init.sql runs on first boot.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: curriculum-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: curriculum
+      POSTGRES_PASSWORD: curriculum
+      POSTGRES_DB: curriculum
+    ports:
+      - "5433:5432"
+    volumes:
+      - curriculum_pg:/var/lib/postgresql/data
+      - ./schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U curriculum -d curriculum"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  curriculum_pg:
