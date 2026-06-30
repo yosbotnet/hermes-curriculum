@@ -16,8 +16,9 @@ optional, environment-specific dependencies. They are imported *inside* the
 functions that need them, never at module load, so ``import curriculum.app.build``
 succeeds on a machine with no database driver and no network -- which is exactly
 what lets the manifest loader (pure JSON + validation) be unit-tested offline and
-lets the rest of the test-suite import this module freely. The Nous providers and
-the ingestion passes, by contrast, are stdlib-only and safe to import eagerly.
+lets the rest of the test-suite import this module freely. The OpenAI-compatible
+provider adapter and the ingestion passes, by contrast, are stdlib-only and safe
+to import eagerly.
 
 Standard library plus the project's own modules only.
 """

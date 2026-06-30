@@ -218,8 +218,8 @@ def _render(argv: list[str]) -> str:
     """Render an argv as a copy-pasteable shell line, keeping the key a reference.
 
     Every token is shell-quoted so paths with spaces survive, EXCEPT the
-    ``NOUS_API_KEY`` assignment, which is emitted as ``NOUS_API_KEY="$NOUS_API_KEY"``
-    so the secret never lands in printed output (the user's shell expands it at
+    ``CURRICULUM_API_KEY`` assignment, which is emitted as
+    ``CURRICULUM_API_KEY="$CURRICULUM_API_KEY"`` so the secret never lands in
     paste time) while the line stays runnable.
     """
     parts: list[str] = []
