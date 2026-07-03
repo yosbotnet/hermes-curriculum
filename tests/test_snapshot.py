@@ -6,7 +6,7 @@ no I/O -- so these tests build tiny states and assert the named invariants:
 * stability_days weights every state's stability by its concept importance
   (importance padding, not raw corpus size, is what moves the number),
 * ripeness buckets due reviews by CALENDAR DAY into gain-framed names, with
-  past-due folded into ready_now (there is no "overdue" bucket by design),
+  already-passed due dates folded into ready_now by design,
 * unlock_proximity surfaces never-seen concepts that are one mastered
   prerequisite away from unlocking,
 * consolidation_report counts intervals still intact and reviews done since a

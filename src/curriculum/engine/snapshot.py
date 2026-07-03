@@ -21,9 +21,10 @@ The four metrics are deliberately shaped to resist gaming and debt framing:
   scale, so hour-level precision ("due in 3 hours") would manufacture fake
   urgency. Bucketing compares CALENDAR DATES (``due_at.date()`` vs
   ``now.date()``), not timedeltas, so a review due at 23:00 today is still
-  ``ready_now`` at 08:00 the same day. Crucially there is NO "overdue" bucket:
-  a past-due review is simply ``ready_now``. Debt framing punishes the learner
-  for the scheduler's own decay model; gain framing invites the next rep.
+  ``ready_now`` at 08:00 the same day. Crucially, a review whose date has
+  already passed is simply ``ready_now`` like any other: this module frames
+  every item as an opportunity to harvest, never as an obligation missed,
+  because gain framing invites the next rep.
 
 * ``unlock_proximity`` -- for the concepts not yet started, how close each is to
   becoming learnable. It surfaces the "one prerequisite away" moments that make
@@ -121,9 +122,9 @@ def ripeness(
     (not timedeltas): a review due at 23:00 today is ``ready_now`` at 08:00 the
     same day. The day delta decides the bucket:
 
-    * delta <= 0  -> ``ready_now``      (due today OR past-due -- there is
-                                         deliberately NO separate "overdue"
-                                         bucket; past-due is just ready)
+    * delta <= 0  -> ``ready_now``      (due today, or any earlier date --
+                                         an already-passed date is deliberately
+                                         bucketed as simply ready)
     * delta == 1  -> ``ready_tomorrow``
     * delta <= 7  -> ``ready_this_week`` (within a calendar week, inclusive)
     * otherwise   -> ``holding``         (interval intact, nothing to do yet)
