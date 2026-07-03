@@ -126,6 +126,40 @@ class _StubService(CurriculumService):
             "due_now": 1,
         }
 
+    def checkin(self, course: str):
+        self.calls.append(("checkin", course))
+        return {
+            "course": course,
+            "stability_days": 12.5,
+            "delta_since_last_check": 2.0,
+            "consolidation": {"holding": 3, "reviewed_since": 1},
+            "ripeness": {"ripe": 1, "green": 2},
+            "unlocks_ready": ["c3"],
+            "near_unlocks": [{"concept_id": "c4", "missing": 1, "one_away": True}],
+            "by_mastery": {"new": 1, "learning": 1, "solid": 1, "exam_ready": 0},
+        }
+
+    def frontier(self, course: str, *, focus: str | None = None):
+        self.calls.append(("frontier", course, focus))
+        return {
+            "push": {
+                "concept_id": "c1",
+                "mode": "teach",
+                "reason": "learnable now",
+                "score": 0.9,
+            },
+            "reinforce": {
+                "concept_id": "c2",
+                "mode": "review",
+                "reason": "review ready",
+                "score": 0.4,
+            },
+        }
+
+    def flag_question(self, question_id: str, *, reason: str = ""):
+        self.calls.append(("flag_question", question_id, reason))
+        return {"question_id": question_id, "status": "retired"}
+
 
 def _payload(raw):
     """Extract the JSON dict from whatever ``FastMCP.call_tool`` returned.
@@ -154,7 +188,10 @@ class ImportContractTest(unittest.TestCase):
         self.assertTrue(hasattr(server, "build_server"))
         self.assertTrue(hasattr(server, "main"))
         self.assertTrue(hasattr(server, "mcp"))  # None when the SDK is absent
-        self.assertEqual(server.TOOL_NAMES, ("next", "explain", "quiz", "grade", "state"))
+        self.assertEqual(
+            server.TOOL_NAMES,
+            ("next", "explain", "quiz", "grade", "state", "checkin", "frontier", "flag_question"),
+        )
 
 
 class SerialiserTest(unittest.TestCase):
@@ -252,6 +289,37 @@ class PureRouterTest(unittest.TestCase):
         self.assertIsInstance(out, dict)
         self.assertEqual(out["course"], "Cyber")
 
+    def test_call_checkin_routes_and_is_plain_dict(self) -> None:
+        out = server._call_checkin(self.stub, "Cyber")
+        self.assertEqual(self.stub.calls[-1], ("checkin", "Cyber"))
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["course"], "Cyber")
+        self.assertEqual(out["stability_days"], 12.5)
+        self.assertEqual(out["unlocks_ready"], ["c3"])
+
+    def test_call_checkin_is_json_serialisable(self) -> None:
+        out = server._call_checkin(self.stub, "Cyber")
+        self.assertEqual(json.loads(json.dumps(out)), out)
+
+    def test_call_frontier_forwards_focus(self) -> None:
+        out = server._call_frontier(self.stub, "Cyber", focus="crypto")
+        self.assertEqual(self.stub.calls[-1], ("frontier", "Cyber", "crypto"))
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["push"]["concept_id"], "c1")
+
+    def test_call_frontier_default_focus_is_none(self) -> None:
+        server._call_frontier(self.stub, "Cyber")
+        self.assertEqual(self.stub.calls[-1], ("frontier", "Cyber", None))
+
+    def test_call_flag_question_forwards_reason(self) -> None:
+        out = server._call_flag_question(self.stub, "q1", reason="broken distractor")
+        self.assertEqual(self.stub.calls[-1], ("flag_question", "q1", "broken distractor"))
+        self.assertEqual(out, {"question_id": "q1", "status": "retired"})
+
+    def test_call_flag_question_default_reason_is_empty(self) -> None:
+        server._call_flag_question(self.stub, "q1")
+        self.assertEqual(self.stub.calls[-1], ("flag_question", "q1", ""))
+
 
 # --------------------------------------------------------------------------- #
 # Guard behaviour when the SDK is absent (only meaningful without it).
@@ -333,6 +401,29 @@ class McpServerTest(unittest.TestCase):
         payload = _payload(raw)
         self.assertEqual(payload["course"], "Cyber")
         self.assertEqual(payload["total"], 3)
+
+    def test_routed_checkin_returns_reading(self) -> None:
+        raw = asyncio.run(self.server.call_tool("checkin", {"course": "Cyber"}))
+        payload = _payload(raw)
+        self.assertEqual(payload["course"], "Cyber")
+        self.assertEqual(payload["stability_days"], 12.5)
+        self.assertEqual(payload["unlocks_ready"], ["c3"])
+
+    def test_routed_frontier_forwards_focus(self) -> None:
+        raw = asyncio.run(
+            self.server.call_tool("frontier", {"course": "Cyber", "focus": "crypto"})
+        )
+        payload = _payload(raw)
+        self.assertEqual(payload["push"]["concept_id"], "c1")
+        self.assertEqual(self.stub.calls[-1], ("frontier", "Cyber", "crypto"))
+
+    def test_routed_flag_question_retires(self) -> None:
+        raw = asyncio.run(
+            self.server.call_tool("flag_question", {"question_id": "q1", "reason": "typo"})
+        )
+        payload = _payload(raw)
+        self.assertEqual(payload, {"question_id": "q1", "status": "retired"})
+        self.assertEqual(self.stub.calls[-1], ("flag_question", "q1", "typo"))
 
 
 if __name__ == "__main__":

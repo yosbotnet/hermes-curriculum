@@ -50,10 +50,9 @@ class CurriculumService(ABC):
     def state(self, course: str) -> Mapping[str, Any]:
         """Burndown / progress snapshot for the course."""
 
-    # The motivation-layer surface. Declared with a default body (rather than
-    # @abstractmethod) so implementations written before this surface existed
-    # -- e.g. transport-level test stubs -- remain constructible; a subclass
-    # that does not override simply does not offer the capability yet.
+    # The motivation-layer surface. Every implementation of this port must
+    # offer these; transport-level test stubs override them with canned DTOs.
+    @abstractmethod
     def checkin(self, course: str) -> Mapping[str, Any]:
         """The honest game-state reading for a course.
 
@@ -63,8 +62,8 @@ class CurriculumService(ABC):
         (never-seen concepts whose prerequisites are all satisfied),
         ``near_unlocks`` and ``by_mastery``. Logs one "check" engagement
         event carrying the totals so the next check can diff against them."""
-        raise NotImplementedError
 
+    @abstractmethod
     def frontier(self, course: str, *, focus: str | None = None) -> Mapping[str, Any]:
         """Up to three strategy buckets for what to pursue next.
 
@@ -74,10 +73,9 @@ class CurriculumService(ABC):
         "reason", "score"}``; empty buckets are omitted. A pure read plus one
         "escalate" engagement event: it never consumes a candidate or advances
         the interleaving memory -- choosing happens later via next/quiz."""
-        raise NotImplementedError
 
+    @abstractmethod
     def flag_question(self, question_id: str, *, reason: str = "") -> Mapping[str, Any]:
         """Retire a question so it is never served again (the kill switch),
         logging an "item_flag" engagement event with the reason. Returns
         ``{"question_id", "status": "retired"}``."""
-        raise NotImplementedError
