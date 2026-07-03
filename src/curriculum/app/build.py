@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
-from ..domain.entities import Question, QuestionContent, SourceRef
+from ..domain.entities import Concept, Edge, Question, QuestionContent, SourceRef
+from ..domain.enums import EdgeType
 from ..domain.errors import ConfigError
 from ..ingestion.passes import (
     DedupePass,
@@ -38,6 +39,7 @@ from ..ingestion.passes import (
     IngestionContext,
     SpinePass,
     VerifyPass,
+    spine_within_source_key,
 )
 from ..ingestion.pipeline import Pipeline
 from ..providers_nous import NousEmbedder, NousLlm
@@ -179,12 +181,18 @@ def ingest(manifest: dict, settings: Settings) -> dict:
     workers = _worker_count(settings, len(sources))
 
     files = concepts = edges = 0
+    # Per-source persisted concepts, keyed by the source's MANIFEST index (not
+    # its completion order): cross-source spine stitching runs after the pool and
+    # must be driven by manifest order, so a source that failed to ingest simply
+    # never lands here and is skipped when neighbours are stitched.
+    concepts_by_index: dict[int, list[Concept]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_ingest_source, source, manifest, settings, content): source
-            for source in sources
+            executor.submit(_ingest_source, source, manifest, settings, content): index
+            for index, source in enumerate(sources)
         }
         for future in as_completed(futures):
+            index = futures[future]
             try:
                 counts = future.result()
             except Exception:  # noqa: BLE001 - one bad source must not sink the batch
@@ -192,6 +200,16 @@ def ingest(manifest: dict, settings: Settings) -> dict:
             files += 1
             concepts += counts["concepts"]
             edges += counts["edges"]
+            concepts_by_index[index] = counts["concept_list"]
+
+    # Stitch consecutive spine sources AFTER every source is ingested and
+    # committed. This is the one step that cannot happen per-source (each source
+    # gets its own pipeline/context, so SpinePass only ever chains within a
+    # file); doing it here, in manifest order, is what connects a spine split
+    # across per-chapter files into one trusted prerequisite chain.
+    edges += _persist_stitch_edges(
+        _spine_stitch_edges(sources, concepts_by_index), settings
+    )
 
     return {"files": files, "concepts": concepts, "edges": edges}
 
@@ -251,7 +269,94 @@ def _ingest_source(
         )
     finally:
         connection.close()
-    return {"concepts": counts["concepts"], "edges": counts["edges"]}
+    # ``context.concepts`` is the VERIFIED, just-persisted set for this source
+    # (VerifyPass pruned the ungrounded ones). Carrying it back lets the post-pool
+    # stitch pick this source's head/tail concept without re-reading the database.
+    return {
+        "concepts": counts["concepts"],
+        "edges": counts["edges"],
+        "concept_list": list(context.concepts),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1b: stitch consecutive spine sources into one cross-file backbone.
+# --------------------------------------------------------------------------- #
+def _spine_stitch_edges(
+    sources: list[dict], concepts_by_index: dict[int, list[Concept]]
+) -> list[Edge]:
+    """Compute the cross-source spine edges (pure; no I/O), in manifest order.
+
+    ``SpinePass`` chains a spine source's concepts into trusted PREREQUISITE
+    edges, but each source is ingested through its OWN pipeline/context, so those
+    chains never cross file boundaries. This closes the gap: for every ADJACENT
+    pair of spine sources -- adjacency measured over the spine sources only, so an
+    intervening satellite does not break a pair -- it mints exactly one edge from
+    the tail concept of the earlier source to the head concept of the later one.
+
+    ``concepts_by_index`` maps a source's manifest index to its persisted
+    concepts; a spine source that produced none (it failed to ingest, or every
+    candidate was pruned) is absent/empty and is skipped, so its neighbours become
+    adjacent instead. Head/tail are the first/last concept under
+    :func:`curriculum.ingestion.passes.spine_within_source_key` -- the very key
+    SpinePass uses within a source -- keeping the cross-file order consistent with
+    the intra-file chain. The edge mirrors a spine edge exactly (provenance
+    ``"spine"``, confidence ``1.0``, grounded at the tail concept's first
+    citation), so on the ``(src, dst, type)`` primary key it upserts in place: a
+    re-run does not duplicate, and it wins over any inferred PREREQUISITE that the
+    linker may have guessed between the same endpoints.
+    """
+    # The spine sources, in manifest order, that actually produced concepts --
+    # each reduced to (token, head_concept, tail_concept).
+    runs: list[tuple[str, Concept, Concept]] = []
+    for index, source in enumerate(sources):
+        if not bool(source.get("spine", False)):
+            continue  # satellites carry no trusted ordering to chain
+        source_concepts = concepts_by_index.get(index) or []
+        if not source_concepts:
+            continue  # produced nothing -> its neighbours become adjacent
+        ordered = sorted(source_concepts, key=spine_within_source_key)
+        runs.append((source["token"], ordered[0], ordered[-1]))
+
+    stitched: list[Edge] = []
+    for (tail_token, _, tail), (head_token, head, _) in zip(runs, runs[1:]):
+        stitched.append(
+            Edge(
+                src=tail.id,
+                dst=head.id,
+                type=EdgeType.PREREQUISITE,
+                rationale=f"spine order: {tail_token} -> {head_token}",
+                # Grounded at the tail concept's first citation so the trusted
+                # edge stays auditable back to a real source file.
+                source_ref=tail.source_refs[0] if tail.source_refs else None,
+                provenance="spine",
+                confidence=1.0,
+            )
+        )
+    return stitched
+
+
+def _persist_stitch_edges(edges: list[Edge], settings: Settings) -> int:
+    """Upsert cross-source spine edges on a fresh connection; return the count.
+
+    Runs after the ingest thread pool has closed (so every source is committed),
+    on its own short-lived connection. Upsert is idempotent on the edge's
+    ``(src, dst, type)`` primary key, so re-running the build neither duplicates
+    nor corrupts the backbone. A no-op (and no connection) when there is nothing
+    to stitch -- the common single-spine / no-spine case.
+    """
+    if not edges:
+        return 0
+    from ..storage.postgres import PostgresRepositories, connect
+
+    connection = connect(settings.database_url)
+    try:
+        repos = PostgresRepositories(connection)
+        for edge in edges:
+            repos.edges.upsert(edge)
+    finally:
+        connection.close()
+    return len(edges)
 
 
 # --------------------------------------------------------------------------- #

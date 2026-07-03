@@ -19,3 +19,4 @@ bundle/
 
 # Local dev/one-off scripts (superseded by the CLI; kept local, not published).
 scripts/
+.claude/

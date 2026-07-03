@@ -40,12 +40,17 @@ satellite that hangs concepts off the spine's backbone.
 
 Note on chaining scope: the `spine` boolean on a `corpus.json` source entry is honored by
 the ingestion pipeline (SpinePass; see `docs/superpowers/plans/2026-07-03-motivation-layer.md`),
-but chaining happens PER SOURCE FILE -- each source is ingested through its own pipeline run,
-so concepts are chained within one spine file and never across files. Practical consequence:
-put an entire spine (for example, all the PMPP chapters you transcribe) into ONE plain-text
-file, in order. Splitting a spine across several `spine: true` files produces several
-disconnected chains with no trusted edges between them, which defeats the point of a spine.
-Cross-file stitching is tracked as follow-up work; until it lands, one file per spine.
+and chaining now works both WITHIN a spine file AND ACROSS files. Each source is ingested
+through its own pipeline run, which chains that file's concepts internally; then, once the
+whole corpus is ingested, the build stitches consecutive spine sources together in manifest
+order -- the tail concept of one spine file is joined to the head concept of the next by the
+same trusted `PREREQUISITE` edge (full confidence, spine provenance). Practical consequence:
+you may split a spine across several `spine: true` files (for example, one file per PMPP
+chapter, listed in order) and still get a single connected backbone. Adjacent spine sources
+are stitched even when a satellite source sits between them in the manifest, and a spine file
+that yields no concepts is skipped so its neighbours stitch directly. Concatenating an entire
+spine into ONE plain-text file, in order, is equally fine and produces the same chain -- pick
+whichever is easier to maintain.
 
 ## b. Phase 1 -- CUDA foundations and the performance model
 
@@ -62,8 +67,10 @@ coalescing, performance considerations (occupancy, divergence, tiling), a long r
 parallel-pattern chapters (convolution, stencil, histogram, reduction, prefix sum/scan,
 merge, sorting, sparse matrix formats), and later chapters on graph traversal, deep-learning
 primitives, and more advanced/dynamic-parallelism topics. Transcribe or extract the chapters
-you want, in that order, into ONE plain-text file and mark that single source `spine: true`
-(spine chaining is per source file; see the note in section a).
+you want, in that order, and mark each spine source `spine: true`. You can put the whole spine
+in ONE plain-text file, or split it across several files (for example one per chapter) listed
+in order -- the build chains consecutive spine sources across files, so either layout produces
+the same single connected backbone (see the note in section a).
 
 **Spine, option B (free alternative): GPU MODE lecture series plus the CUDA C++ Programming
 Guide.** GPU MODE (formerly CUDA MODE) publishes a numbered lecture series covering the same
@@ -211,8 +218,9 @@ deliberately, at a specific and named point, rather than inferred and hedged eve
 The example below follows the schema in `corpus.example.json` at the repository root, with
 one addition: a per-source `"spine"` boolean (`true` for a source whose ordering should be
 chained into trusted prerequisite edges, omitted or `false` for a satellite). As noted in
-section (a), this flag depends on a sibling ingestion change; if it is not yet present in
-your checkout, including it is harmless but has no effect until the change lands.
+section (a), consecutive spine sources are chained both within and across files, so the
+multi-chapter spine below (one `spine: true` file per PMPP chapter, in order) links into a
+single trusted backbone; a single concatenated `pmpp` file would work identically.
 
 Every path below is a placeholder for a plain-text file you create yourself from material
 you already legally own or that is freely and legitimately available (for example, your own
@@ -225,7 +233,10 @@ that material is included in or committed to this repository; only the manifest 
   "course": "GPUKernelOptimization",
   "chunk_lines": 150,
   "sources": [
-    { "path": "materials/pmpp-chapters-in-order.txt", "token": "pmpp", "spine": true },
+    { "path": "materials/pmpp-ch01.txt", "token": "pmpp-ch01", "spine": true },
+    { "path": "materials/pmpp-ch02.txt", "token": "pmpp-ch02", "spine": true },
+    { "path": "materials/pmpp-ch03.txt", "token": "pmpp-ch03", "spine": true },
+    { "path": "materials/pmpp-ch04.txt", "token": "pmpp-ch04", "spine": true },
     { "path": "materials/cuda-best-practices-guide.txt", "token": "cuda-best-practices" },
     { "path": "materials/nsight-compute-docs.txt", "token": "nsight-compute-docs" },
     { "path": "materials/simon-boehm-cuda-matmul-worklog.txt", "token": "boehm-matmul-worklog" },
@@ -244,8 +255,8 @@ that material is included in or committed to this repository; only the manifest 
 }
 ```
 
-If you use the free alternative for Phase 1 instead of PMPP, replace the `pmpp` entry with
-one concatenated file of your GPU MODE lecture transcripts or CUDA C++ Programming Guide
-sections, in the order you extracted them, and mark that single file `spine: true`; add the
-other body of material as a satellite unless you are confident interleaving both into one
-single trusted sequence in one file.
+If you use the free alternative for Phase 1 instead of PMPP, replace the `pmpp-ch*` entries
+with your GPU MODE lecture transcripts or CUDA C++ Programming Guide sections, in the order
+you extracted them -- either one concatenated file or several `spine: true` files, since the
+build chains consecutive spine sources across files either way. Add the other body of material
+as a satellite unless you are confident interleaving both into one single trusted sequence.
