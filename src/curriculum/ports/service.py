@@ -42,8 +42,42 @@ class CurriculumService(ABC):
         skipped_edges: tuple[str, ...] = (),
     ) -> Mapping[str, Any]:
         """Record a graded answer: update FSRS, run FIRe propagation, update
-        connection-skip counts, log calibration. Returns the new schedule."""
+        connection-skip counts, log calibration. Returns the new schedule,
+        including a ``ripple`` report of the importance-weighted stability
+        change across the primary concept and every FIRe-credited concept."""
 
     @abstractmethod
     def state(self, course: str) -> Mapping[str, Any]:
         """Burndown / progress snapshot for the course."""
+
+    # The motivation-layer surface. Declared with a default body (rather than
+    # @abstractmethod) so implementations written before this surface existed
+    # -- e.g. transport-level test stubs -- remain constructible; a subclass
+    # that does not override simply does not offer the capability yet.
+    def checkin(self, course: str) -> Mapping[str, Any]:
+        """The honest game-state reading for a course.
+
+        Returns ``course``, ``stability_days`` (importance-weighted memory
+        capital), ``delta_since_last_check`` (change since the previous check,
+        None on the first), ``consolidation``, ``ripeness``, ``unlocks_ready``
+        (never-seen concepts whose prerequisites are all satisfied),
+        ``near_unlocks`` and ``by_mastery``. Logs one "check" engagement
+        event carrying the totals so the next check can diff against them."""
+        raise NotImplementedError
+
+    def frontier(self, course: str, *, focus: str | None = None) -> Mapping[str, Any]:
+        """Up to three strategy buckets for what to pursue next.
+
+        ``push`` (the best new concept to start), ``reinforce`` (the review
+        with the weakest recall right now) and ``breakthrough`` (the nearest
+        locked concept, one_away first), each as ``{"concept_id", "mode",
+        "reason", "score"}``; empty buckets are omitted. A pure read plus one
+        "escalate" engagement event: it never consumes a candidate or advances
+        the interleaving memory -- choosing happens later via next/quiz."""
+        raise NotImplementedError
+
+    def flag_question(self, question_id: str, *, reason: str = "") -> Mapping[str, Any]:
+        """Retire a question so it is never served again (the kill switch),
+        logging an "item_flag" engagement event with the reason. Returns
+        ``{"question_id", "status": "retired"}``."""
+        raise NotImplementedError

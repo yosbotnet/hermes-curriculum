@@ -31,6 +31,7 @@ from ..ports.repositories import (
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
+    TelemetryRepository,
 )
 from ..ports.service import CurriculumService
 from ..ports.strategies import ScoringTerm
@@ -42,6 +43,7 @@ from ..storage.memory import (
     InMemoryLearnerStateRepository,
     InMemoryQuestionRepository,
     InMemoryReviewLogRepository,
+    InMemoryTelemetryRepository,
 )
 from .policies import Clock, SystemClock
 from .service import CurriculumApplicationService
@@ -71,10 +73,14 @@ class InMemoryStack:
     reviews: ReviewLogRepository
     profiles: CourseProfileRepository
     content: ContentRepository
+    telemetry: TelemetryRepository
 
 
 def build_in_memory(
-    *, rng: random.Random | None = None, clock: Clock | None = None
+    *,
+    rng: random.Random | None = None,
+    clock: Clock | None = None,
+    telemetry: TelemetryRepository | None = None,
 ) -> InMemoryStack:
     """A fully-wired stack on in-memory repositories. No Postgres, no inference."""
     concepts = InMemoryConceptIndexRepository()
@@ -84,6 +90,7 @@ def build_in_memory(
     reviews = InMemoryReviewLogRepository()
     profiles = InMemoryCourseProfileRepository()
     content = InMemoryContentRepository()
+    telemetry = telemetry or InMemoryTelemetryRepository()
     service = CurriculumApplicationService(
         concepts=concepts,
         edges=edges,
@@ -96,9 +103,12 @@ def build_in_memory(
         selection=WeightedSamplingPolicy(default_terms(), rng=rng or random.Random(0)),
         propagation=FirePropagation(edges),
         resolve_config=engine_config_for,
+        telemetry=telemetry,
         clock=clock or SystemClock(),
     )
-    return InMemoryStack(service, concepts, edges, questions, states, reviews, profiles, content)
+    return InMemoryStack(
+        service, concepts, edges, questions, states, reviews, profiles, content, telemetry
+    )
 
 
 def build_service(settings: Settings | None = None) -> CurriculumService:
@@ -122,5 +132,6 @@ def build_service(settings: Settings | None = None) -> CurriculumService:
         selection=WeightedSamplingPolicy(default_terms(), rng=random.Random()),
         propagation=FirePropagation(repos.edges),
         resolve_config=engine_config_for,
+        telemetry=repos.telemetry,
         clock=SystemClock(),
     )
