@@ -7,7 +7,8 @@ course materials; it builds a concept/edge graph, generates grounded exam questi
 serves the result to a host (Hermes) over MCP.
 
 No source materials and no secrets are committed here -- you supply your own materials via
-`corpus.json` and your `NOUS_API_KEY` at runtime.
+`corpus.json` and your `CURRICULUM_API_KEY` at runtime. Inference goes through any
+OpenAI-compatible endpoint (Nous, NVIDIA NIM, vLLM, ...), selected with `CURRICULUM_BASE_URL`.
 
 ## Quickstart
 
@@ -17,11 +18,15 @@ One screen:
 ```sh
 docker compose up -d db                                   # Postgres+pgvector on :5433
 uv venv && uv pip install -e '.[postgres,mcp,nous]'       # install with all adapters
-export NOUS_API_KEY=...                                    # the only required setting
+export CURRICULUM_API_KEY=...                              # the only required setting
+# export CURRICULUM_BASE_URL=https://integrate.api.nvidia.com/v1   # any OpenAI-compatible endpoint
 cp corpus.example.json corpus.json                         # then edit it for your course
 .venv/bin/curriculum build corpus.json                     # ingest -> link -> questions
 .venv/bin/curriculum status --course <your-course>         # read-only graph counts
 ```
+
+`CURRICULUM_API_KEY` / `CURRICULUM_BASE_URL` are the primary names; the legacy `NOUS_API_KEY`
+/ `NOUS_BASE_URL` still work as fallbacks (the generic names win when both are set).
 
 Run `.venv/bin/curriculum doctor` first to check prerequisites (docker, DB, key, bundle).
 Tests need neither a database nor a key: `make test`.
@@ -46,8 +51,9 @@ mcp/           stdio MCP server exposing the service to Hermes
 
 The core depends only on `domain` + `ports`; everything external is a swappable adapter
 (Dependency Inversion). The engine therefore runs and tests with in-memory + fake adapters,
-with no Postgres and no paid inference. Heavy/optional imports (`psycopg`, `mcp`, the Nous
-client) are deferred into the functions that use them, so the package imports cleanly on a
+with no Postgres and no paid inference. Heavy/optional imports (`psycopg`, `mcp`, the
+OpenAI-compatible HTTP provider) are deferred into the functions that use them, so the
+package imports cleanly on a
 machine that has none of them installed.
 
 ## Storage split (polyglot, single-ownership)
