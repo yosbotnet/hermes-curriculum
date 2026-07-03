@@ -53,6 +53,7 @@ __all__ = [
     "IngestionPass",
     "ExtractPass",
     "DedupePass",
+    "SpinePass",
     "InferEdgesPass",
     "QuestionGenPass",
     "VerifyPass",
@@ -236,6 +237,14 @@ class IngestionContext:
     # DedupePass and persisted as the pgvector cache. A derived cache, not part
     # of the OKF source of truth, hence it rides on the context, not in content.
     embeddings: dict[str, list[float]] = field(default_factory=dict)
+    # Concept-to-source attribution: concept id -> (source name, source order
+    # index). Populated by ExtractPass from the chunk each concept was extracted
+    # from, so SpinePass can recover a source's document order for chaining.
+    source_of: dict[str, tuple[str, int]] = field(default_factory=dict)
+    # The set of source names (chunk ``file`` tokens) whose ordering is human
+    # vetted -- a textbook's chapter sequence -- and therefore trusted as the
+    # prerequisite backbone. Empty means "no spine", so SpinePass is a no-op.
+    spine_sources: set[str] = field(default_factory=set)
 
     def concept_content_for(self, concept_id: str) -> ConceptContent | None:
         """Return the accumulated prose for ``concept_id`` (linear scan; the
@@ -318,7 +327,14 @@ class ExtractPass(IngestionPass):
         self._llm = llm
 
     def run(self, ctx: IngestionContext) -> None:
+        # Assign each distinct source a stable order index on first sight so the
+        # attribution carries the source's position in the corpus, not just its
+        # name -- SpinePass needs both to chain a spine backbone deterministically.
+        source_order: dict[str, int] = {}
         for chunk in ctx.chunks:
+            source_name = chunk.get("file")
+            if isinstance(source_name, str) and source_name and source_name not in source_order:
+                source_order[source_name] = len(source_order)
             raw = self._llm.complete(
                 self._prompt(chunk), system=_EXTRACT_SYSTEM, temperature=0.0
             )
@@ -329,6 +345,15 @@ class ExtractPass(IngestionPass):
                 concept, content = built
                 ctx.concepts.append(concept)
                 ctx.concept_content.append(content)
+                # Record which source this concept came from (first attribution
+                # wins, so a concept re-extracted from a later chunk keeps its
+                # earliest source order).
+                if (
+                    isinstance(source_name, str)
+                    and source_name
+                    and concept.id not in ctx.source_of
+                ):
+                    ctx.source_of[concept.id] = (source_name, source_order[source_name])
 
     def _prompt(self, chunk: dict[str, Any]) -> str:
         """Build the per-chunk extraction prompt (includes the chunk text and
@@ -492,12 +517,90 @@ class DedupePass(IngestionPass):
 
 
 # --------------------------------------------------------------------------- #
-# Pass 3: infer typed edges between the surviving concepts.
+# Pass 3: lay the trusted prerequisite backbone from human-vetted ordering.
+# --------------------------------------------------------------------------- #
+class SpinePass(IngestionPass):
+    """Chain a spine source's concepts into trusted PREREQUISITE edges.
+
+    A wrong prerequisite edge is a reward bug once unlocks become the
+    learner-facing currency -- gate a learner behind a link that was never real
+    and you have corrupted the whole progression. So the backbone of the graph
+    must NOT come from an LLM guess; it comes from human-vetted ordering: the
+    chapter sequence of a source flagged ``spine`` in the corpus. Those sources'
+    concepts are chained in document order into edges carrying ``provenance
+    "spine"`` and ``confidence 1.0`` -- the trusted skeleton onto which
+    :class:`InferEdgesPass` may only add lower-confidence, auditable cross-links.
+
+    Document order is reconstructed from the attribution ``IngestionContext``
+    carries: each concept's ``(source name, source order index)`` recorded by
+    :class:`ExtractPass`, refined within a source by the first ``source_ref``
+    line. Runs after :class:`DedupePass` (so it never chains a phantom duplicate)
+    and before :class:`InferEdgesPass` (so the trusted edges are already present
+    when inference is told not to overwrite them). A no-op when no source is
+    flagged spine, so an un-annotated corpus behaves exactly as before.
+    """
+
+    name = "spine"
+
+    def run(self, ctx: IngestionContext) -> None:
+        if not ctx.spine_sources:
+            return  # no human-vetted ordering declared -> no backbone to lay
+        ordered = self._ordered_spine_concepts(ctx)
+        for prev, nxt in zip(ordered, ordered[1:]):
+            source_name = ctx.source_of.get(prev.id, ("", 0))[0]
+            refs = prev.source_refs
+            ctx.edges.append(
+                Edge(
+                    src=prev.id,
+                    dst=nxt.id,
+                    type=EdgeType.PREREQUISITE,
+                    rationale=f"spine order: {source_name}",
+                    # A trusted edge stays auditable: it inherits the src
+                    # concept's citation so it points back at the real source
+                    # file (and survives the VerifyPass grounding gate).
+                    source_ref=refs[0] if refs else None,
+                    provenance="spine",
+                    confidence=1.0,
+                )
+            )
+
+    def _ordered_spine_concepts(self, ctx: IngestionContext) -> list[Concept]:
+        """Concepts drawn from a spine source, in document order.
+
+        Sort key is ``(source order in corpus, first source_ref line, id)``:
+        the source's corpus position first, its internal chapter order (the
+        lowest cited line) next, and the concept id as a final deterministic
+        tiebreak. A concept with no line falls to the end of its source.
+        """
+        annotated: list[tuple[int, float, str, Concept]] = []
+        for concept in ctx.concepts:
+            attribution = ctx.source_of.get(concept.id)
+            if attribution is None:
+                continue
+            source_name, order_index = attribution
+            if source_name not in ctx.spine_sources:
+                continue
+            first_line = min(
+                (ref.line for ref in concept.source_refs if ref.line is not None),
+                default=math.inf,
+            )
+            annotated.append((order_index, first_line, concept.id, concept))
+        annotated.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+        return [entry[3] for entry in annotated]
+
+
+# --------------------------------------------------------------------------- #
+# Pass 4: infer typed edges between the surviving concepts.
 # --------------------------------------------------------------------------- #
 _EDGES_SYSTEM = (
     "You infer typed edges (prerequisite|encompasses|related) between concepts. "
     "Cite each edge with a source_ref; never invent one. Reply with JSON only."
 )
+
+# The ceiling on an LLM-inferred edge's confidence. Inference is a guess, so it
+# is never allowed to reach the trust of a human-vetted spine edge (1.0); capping
+# it keeps the two provenances distinguishable and the guesses auditable.
+_MAX_INFERRED_CONFIDENCE = 0.85
 
 
 class InferEdgesPass(IngestionPass):
@@ -513,6 +616,14 @@ class InferEdgesPass(IngestionPass):
     here; dangling references to non-existent concepts are tolerated and left
     for VerifyPass to prune once the final concept set is known, so this pass
     stays a pure structural translator.
+
+    Every edge it mints is stamped ``provenance "inferred"`` with its
+    ``confidence`` capped at :data:`_MAX_INFERRED_CONFIDENCE` (0.85): an LLM
+    guess is never allowed to look as trustworthy as the human-vetted spine, so
+    it can be sorted below, audited, or overridden. And it never overwrites the
+    backbone: any PREREQUISITE it proposes between two concepts already joined by
+    a spine edge is dropped, so a low-confidence guess cannot shadow a trusted
+    link.
     """
 
     name = "infer_edges"
@@ -526,12 +637,20 @@ class InferEdgesPass(IngestionPass):
         if not concepts:
             return
         files = ctx.source_files()
+        # The trusted backbone already present (SpinePass ran first): its
+        # PREREQUISITE endpoints are off-limits to inference so a guessed edge
+        # can never overwrite a human-vetted one.
+        spine_keys = {
+            (edge.src, edge.dst)
+            for edge in ctx.edges
+            if edge.provenance == "spine" and edge.type is EdgeType.PREREQUISITE
+        }
         # One call per batch of <=batch_size SOURCE concepts (the full id set is
         # supplied for valid endpoints). Bounding the output is what avoids the
         # JSON truncation that silently dropped ALL edges on high-concept decks.
         bs = self._batch_size
         for i in range(0, len(concepts), bs):
-            self._infer(ctx, concepts[i : i + bs], concepts, files)
+            self._infer(ctx, concepts[i : i + bs], concepts, files, spine_keys)
 
     def _infer(
         self,
@@ -539,6 +658,7 @@ class InferEdgesPass(IngestionPass):
         focus: Sequence[Concept],
         all_concepts: Sequence[Concept],
         files: set[str],
+        spine_keys: set[tuple[str, str]],
     ) -> None:
         raw = self._llm.complete(
             self._prompt(focus, all_concepts, files),
@@ -547,8 +667,11 @@ class InferEdgesPass(IngestionPass):
         )
         for item in _items(raw, "edges"):
             edge = self._build(item)
-            if edge is not None:
-                ctx.edges.append(edge)
+            if edge is None:
+                continue
+            if edge.type is EdgeType.PREREQUISITE and (edge.src, edge.dst) in spine_keys:
+                continue  # never overwrite a trusted spine edge with a guess
+            ctx.edges.append(edge)
 
     def _prompt(
         self,
@@ -593,6 +716,13 @@ class InferEdgesPass(IngestionPass):
         importance = _clamp(_as_float(item.get("importance"), 0.5), 0.0, 1.0)
         rationale = item.get("rationale")
         rationale = str(rationale).strip() if rationale else None
+        # Cap the model's confidence at the inferred ceiling: even a "0.99" guess
+        # must stay below the trusted spine, and a missing field defaults to the
+        # ceiling rather than the entity's lower default.
+        confidence = min(
+            _MAX_INFERRED_CONFIDENCE,
+            _clamp(_as_float(item.get("confidence"), _MAX_INFERRED_CONFIDENCE), 0.0, 1.0),
+        )
         return Edge(
             src=src,
             dst=dst,
@@ -601,11 +731,13 @@ class InferEdgesPass(IngestionPass):
             importance=importance,
             rationale=rationale,
             source_ref=_to_source_ref(item.get("source_ref")),
+            provenance="inferred",
+            confidence=confidence,
         )
 
 
 # --------------------------------------------------------------------------- #
-# Pass 4: generate questions per concept and per important edge (KNIGHT).
+# Pass 5: generate questions per concept and per important edge (KNIGHT).
 # --------------------------------------------------------------------------- #
 _QGEN_SYSTEM = (
     "You write grounded exam questions with a grading rubric. "
@@ -755,7 +887,7 @@ class QuestionGenPass(IngestionPass):
 
 
 # --------------------------------------------------------------------------- #
-# Pass 5: adversarial grounding gate.
+# Pass 6: adversarial grounding gate.
 # --------------------------------------------------------------------------- #
 class VerifyPass(IngestionPass):
     """Drop anything that cannot be traced to a real source (the grounding gate).

@@ -36,6 +36,7 @@ from ..ingestion.passes import (
     ExtractPass,
     InferEdgesPass,
     IngestionContext,
+    SpinePass,
     VerifyPass,
 )
 from ..ingestion.pipeline import Pipeline
@@ -109,7 +110,7 @@ def load_manifest(path: str) -> dict:
             "manifest 'sources' must be a non-empty list of {path, token} objects"
         )
 
-    normalised_sources: list[dict[str, str]] = []
+    normalised_sources: list[dict[str, Any]] = []
     for index, source in enumerate(sources):
         if not isinstance(source, dict):
             raise ConfigError(f"manifest source #{index} must be an object")
@@ -123,9 +124,15 @@ def load_manifest(path: str) -> dict:
             raise ConfigError(
                 f"manifest source #{index} must have a non-empty 'token'"
             )
-        # Keep only the two fields the build consumes; drop any extras (e.g. a
-        # human-facing comment) so the normalised shape is exact.
-        normalised_sources.append({"path": source_path, "token": token})
+        # Keep the two fields the build always consumes; drop any extras (e.g. a
+        # human-facing comment) so the normalised shape is exact. A truthy
+        # ``spine`` flag is preserved (and only then), marking this source's
+        # human-vetted ordering as the trusted prerequisite backbone; ordinary
+        # sources keep the bare {path, token} shape.
+        normalised: dict[str, Any] = {"path": source_path, "token": token}
+        if bool(source.get("spine", False)):
+            normalised["spine"] = True
+        normalised_sources.append(normalised)
 
     chunk_lines = data.get("chunk_lines", _DEFAULT_CHUNK_LINES)
     # bool is an int subclass; reject it explicitly so ``true`` is not read as 1.
@@ -213,9 +220,22 @@ def _ingest_source(
         model=settings.embed_model,
         dim=settings.embedding_dim,
     )
-    context = IngestionContext(course=manifest["course"], chunks=chunks)
+    # A source flagged ``spine`` contributes its human-vetted chapter order as
+    # the trusted prerequisite backbone (SpinePass), which InferEdgesPass then
+    # augments with lower-confidence cross-links. The token is the source's
+    # grounding citation, so it is also its spine key.
+    spine_sources = {token} if bool(source.get("spine", False)) else set()
+    context = IngestionContext(
+        course=manifest["course"], chunks=chunks, spine_sources=spine_sources
+    )
     pipeline = Pipeline(
-        [ExtractPass(llm), DedupePass(embedder), InferEdgesPass(llm), VerifyPass()]
+        [
+            ExtractPass(llm),
+            DedupePass(embedder),
+            SpinePass(),
+            InferEdgesPass(llm),
+            VerifyPass(),
+        ]
     )
     pipeline.run(context)
 
