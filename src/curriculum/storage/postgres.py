@@ -37,6 +37,7 @@ from ..domain.entities import (
     SourceRef,
 )
 from ..domain.enums import EdgeType, FsrsRating, Mastery
+from ..domain.telemetry import EngagementEvent
 from ..ports.repositories import (
     ConceptIndexRepository,
     CourseProfileRepository,
@@ -44,6 +45,7 @@ from ..ports.repositories import (
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
+    TelemetryRepository,
 )
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +69,7 @@ __all__ = [
     "PostgresQuestionRepository",
     "PostgresLearnerStateRepository",
     "PostgresReviewLogRepository",
+    "PostgresTelemetryRepository",
     "PostgresCourseProfileRepository",
     "connect",
 ]
@@ -78,10 +81,11 @@ _CONCEPT_COLS = (
 )
 _EDGE_COLS = (
     "src, dst, type, weight, importance, rationale, source_ref, "
-    "exposure_count, skip_count, last_traversed"
+    "exposure_count, skip_count, last_traversed, provenance, confidence"
 )
 _QUESTION_COLS = (
-    "id, concept_id, kind, difficulty, hop_count, edge_id, source_refs, generated_by"
+    "id, concept_id, kind, difficulty, hop_count, edge_id, source_refs, "
+    "generated_by, status"
 )
 _STATE_COLS = (
     "concept_id, stability, difficulty, last_review, due_at, reps, lapses, mastery"
@@ -93,6 +97,7 @@ _PROFILE_COLS = (
     "course, archetype, exam_format, weights, target_retention, "
     "exam_date, confirmed_by_user"
 )
+_ENGAGEMENT_COLS = "kind, course, at, payload"
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +180,8 @@ def _row_to_edge(row: tuple) -> Edge:
         exposure_count=row[7],
         skip_count=row[8],
         last_traversed=row[9],
+        provenance=row[10],
+        confidence=row[11],
     )
 
 
@@ -188,6 +195,7 @@ def _row_to_question(row: tuple) -> Question:
         edge_id=row[5],
         source_refs=_refs_from_json(row[6]),
         generated_by=row[7],
+        status=row[8],
     )
 
 
@@ -213,6 +221,17 @@ def _row_to_event(row: tuple) -> ReviewEvent:
         question_id=row[4],
         predicted=row[5],
         scheduler_ver=row[6],
+    )
+
+
+def _row_to_engagement(row: tuple) -> EngagementEvent:
+    # payload is jsonb; psycopg parses it to a dict. Coalesce a NULL/absent
+    # payload to an empty dict to match the entity's default.
+    return EngagementEvent(
+        kind=row[0],
+        course=row[1],
+        at=row[2],
+        payload=row[3] or {},
     )
 
 
@@ -352,8 +371,8 @@ class PostgresEdgeRepository(_PgRepo, EdgeRepository):
             """
             INSERT INTO edge
                 (src, dst, type, weight, importance, rationale, source_ref,
-                 exposure_count, skip_count, last_traversed)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 exposure_count, skip_count, last_traversed, provenance, confidence)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (src, dst, type) DO UPDATE SET
                 weight = EXCLUDED.weight,
                 importance = EXCLUDED.importance,
@@ -361,7 +380,9 @@ class PostgresEdgeRepository(_PgRepo, EdgeRepository):
                 source_ref = EXCLUDED.source_ref,
                 exposure_count = EXCLUDED.exposure_count,
                 skip_count = EXCLUDED.skip_count,
-                last_traversed = EXCLUDED.last_traversed
+                last_traversed = EXCLUDED.last_traversed,
+                provenance = EXCLUDED.provenance,
+                confidence = EXCLUDED.confidence
             """,
             (
                 edge.src,
@@ -376,6 +397,8 @@ class PostgresEdgeRepository(_PgRepo, EdgeRepository):
                 edge.exposure_count,
                 edge.skip_count,
                 edge.last_traversed,
+                edge.provenance,
+                edge.confidence,
             ),
         )
 
@@ -473,8 +496,8 @@ class PostgresQuestionRepository(_PgRepo, QuestionRepository):
             """
             INSERT INTO question
                 (id, concept_id, edge_id, kind, difficulty, hop_count,
-                 source_refs, generated_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                 source_refs, generated_by, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 concept_id = EXCLUDED.concept_id,
                 edge_id = EXCLUDED.edge_id,
@@ -482,7 +505,8 @@ class PostgresQuestionRepository(_PgRepo, QuestionRepository):
                 difficulty = EXCLUDED.difficulty,
                 hop_count = EXCLUDED.hop_count,
                 source_refs = EXCLUDED.source_refs,
-                generated_by = EXCLUDED.generated_by
+                generated_by = EXCLUDED.generated_by,
+                status = EXCLUDED.status
             """,
             (
                 question.id,
@@ -493,6 +517,7 @@ class PostgresQuestionRepository(_PgRepo, QuestionRepository):
                 question.hop_count,
                 Jsonb(_refs_to_json(question.source_refs)),
                 question.generated_by,
+                question.status,
             ),
         )
 
@@ -505,11 +530,13 @@ class PostgresQuestionRepository(_PgRepo, QuestionRepository):
     ) -> Sequence[Question]:
         # Optional filters are independent exact matches (AND semantics). We use
         # "(%s IS NULL OR col = %s)" so one parameterised query covers every
-        # combination without string-building the WHERE clause.
+        # combination without string-building the WHERE clause. Retired questions
+        # are the kill switch: never served, so filtered out here.
         cur = self._conn.execute(
             f"""
             SELECT {_QUESTION_COLS} FROM question
             WHERE concept_id = %s
+              AND status <> 'retired'
               AND (%s::int IS NULL OR difficulty = %s::int)
               AND (%s::int IS NULL OR hop_count = %s::int)
             ORDER BY id
@@ -519,11 +546,24 @@ class PostgresQuestionRepository(_PgRepo, QuestionRepository):
         return [_row_to_question(r) for r in cur.fetchall()]
 
     def by_edge(self, edge_id: str) -> Sequence[Question]:
+        # Retired questions are excluded here too (the kill switch is global).
         cur = self._conn.execute(
-            f"SELECT {_QUESTION_COLS} FROM question WHERE edge_id = %s ORDER BY id",
+            f"SELECT {_QUESTION_COLS} FROM question "
+            "WHERE edge_id = %s AND status <> 'retired' ORDER BY id",
             (edge_id,),
         )
         return [_row_to_question(r) for r in cur.fetchall()]
+
+    def retire(self, question_id: str) -> None:
+        """Mark a question retired so it is never served again.
+
+        Idempotent and total: a bare UPDATE matches zero rows when the id is
+        unknown (a silent no-op, matching the in-memory adapter and ``get``'s
+        tolerance of missing ids) and is harmless when already retired. The row
+        survives (``get`` still returns it) but drops out of by_concept/by_edge."""
+        self._conn.execute(
+            "UPDATE question SET status = 'retired' WHERE id = %s", (question_id,)
+        )
 
 
 class PostgresLearnerStateRepository(_PgRepo, LearnerStateRepository):
@@ -625,6 +665,49 @@ class PostgresReviewLogRepository(_PgRepo, ReviewLogRepository):
         return [_row_to_event(r) for r in cur.fetchall()]
 
 
+class PostgresTelemetryRepository(_PgRepo, TelemetryRepository):
+    """Append-only engagement log backed by ``engagement_log`` (bigserial id)."""
+
+    def append(self, event: EngagementEvent) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO engagement_log (kind, course, at, payload)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                event.kind,
+                event.course,
+                event.at,
+                Jsonb(dict(event.payload)),
+            ),
+        )
+
+    def last(self, kind: str, course: str) -> EngagementEvent | None:
+        # Newest by `at`; the bigserial id breaks an exact `at` tie toward the
+        # later-inserted row, matching the in-memory adapter's index tie-break.
+        cur = self._conn.execute(
+            f"""
+            SELECT {_ENGAGEMENT_COLS} FROM engagement_log
+            WHERE kind = %s AND course = %s
+            ORDER BY at DESC, id DESC
+            LIMIT 1
+            """,
+            (kind, course),
+        )
+        row = cur.fetchone()
+        return _row_to_engagement(row) if row is not None else None
+
+    def list_by_course(self, course: str) -> Sequence[EngagementEvent]:
+        # ORDER BY the monotonic serial id preserves append order (the log is a
+        # course-scoped time series), as the in-memory adapter does.
+        cur = self._conn.execute(
+            f"SELECT {_ENGAGEMENT_COLS} FROM engagement_log WHERE course = %s "
+            "ORDER BY id",
+            (course,),
+        )
+        return [_row_to_engagement(r) for r in cur.fetchall()]
+
+
 class PostgresCourseProfileRepository(_PgRepo, CourseProfileRepository):
     """The one frozen profile per course, backed by ``course_profile``."""
 
@@ -682,6 +765,7 @@ class PostgresRepositories:
         self.questions = PostgresQuestionRepository(conn)
         self.learner_state = PostgresLearnerStateRepository(conn)
         self.review_log = PostgresReviewLogRepository(conn)
+        self.telemetry = PostgresTelemetryRepository(conn)
         self.profiles = PostgresCourseProfileRepository(conn)
 
 
