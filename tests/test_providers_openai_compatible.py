@@ -13,8 +13,10 @@ imports do not break.
 """
 from __future__ import annotations
 
+import io
 import json
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
 from curriculum.providers_openai_compatible import (
@@ -151,6 +153,72 @@ class EmbedderRequestShapeTest(unittest.TestCase):
             embedder.embed([""])
         body = json.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(body["input"], [" "])
+
+
+class LlmFailureLoggingTest(unittest.TestCase):
+    """Issue #3 follow-up: a swallowed LLM failure must still be visible.
+
+    The provider returns "" on a request failure (so one bad chunk does not abort
+    the whole ingest), but that failure MUST also reach the durable build log.
+    It does so through a module-level ``curriculum.providers`` WARNING record with
+    the same diagnostic the interactive stderr line carries.
+    """
+
+    def _failing_llm(self, boom):
+        patcher = mock.patch(
+            "curriculum.providers_openai_compatible.urllib.request.urlopen",
+            side_effect=boom,
+        )
+        return OpenAICompatibleLlm(api_key="k", model="m"), patcher
+
+    def test_request_failure_emits_provider_warning_and_returns_empty(self) -> None:
+        def boom(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        llm, patcher = self._failing_llm(boom)
+        # redirect_stderr keeps the interactive print out of the test report;
+        # it does not affect the logger assertion.
+        with patcher, redirect_stderr(io.StringIO()):
+            with self.assertLogs("curriculum.providers", level="WARNING") as captured:
+                out = llm.complete("p")
+
+        self.assertEqual(out, "")  # still swallowed
+        self.assertEqual(llm.failures, 1)
+        self.assertTrue(
+            any("request failed" in line for line in captured.output),
+            captured.output,
+        )
+
+    def test_http_error_emits_provider_warning(self) -> None:
+        import urllib.error
+
+        def boom(req, timeout=None):
+            raise urllib.error.HTTPError(
+                url="http://x", code=503, msg="down", hdrs=None,
+                fp=io.BytesIO(b"upstream unavailable"),
+            )
+
+        llm, patcher = self._failing_llm(boom)
+        with patcher, redirect_stderr(io.StringIO()):
+            with self.assertLogs("curriculum.providers", level="WARNING") as captured:
+                out = llm.complete("p")
+
+        self.assertEqual(out, "")
+        self.assertTrue(
+            any("HTTP 503" in line for line in captured.output), captured.output
+        )
+
+    def test_interactive_stderr_message_is_not_duplicated_on_console(self) -> None:
+        # Console visibility must not regress: the failure prints exactly ONCE to
+        # stderr (the provider logger does not propagate to the root handler).
+        def boom(req, timeout=None):
+            raise TimeoutError("timed out")
+
+        llm, patcher = self._failing_llm(boom)
+        stderr = io.StringIO()
+        with patcher, redirect_stderr(stderr):
+            llm.complete("p")
+        self.assertEqual(stderr.getvalue().count("request failed"), 1)
 
 
 class LegacyShimImportTest(unittest.TestCase):

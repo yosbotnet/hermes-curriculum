@@ -37,6 +37,14 @@ from ..config import Settings
 __all__ = ["log_path_for", "start_build_log", "close_build_log"]
 
 _LOGGER_NAMESPACE = "curriculum.build"
+# The shared logger the OpenAI-compatible providers emit swallowed-failure
+# WARNINGs on. It is NOT per-invocation (it is a single module-level logger), so
+# each build attaches its own FileHandler here on open and detaches EXACTLY that
+# handler on close -- see start_build_log/close_build_log.
+_PROVIDERS_LOGGER_NAME = "curriculum.providers"
+# Attribute stashed on a per-invocation logger to remember the exact handler it
+# added to the shared providers logger, so close removes only that one.
+_PROVIDER_HANDLER_ATTR = "_curriculum_provider_handler"
 # Per-process monotonic counter so two builds started in the same second (same
 # pid) still get distinct logger names -- otherwise ``logging.getLogger`` would
 # hand back the same singleton and stack a second FileHandler on it.
@@ -101,6 +109,16 @@ def start_build_log(settings: Settings, command: str) -> tuple[logging.Logger, P
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+    # Also route the shared providers logger's records into THIS file, so a
+    # swallowed provider failure (which returns "" rather than raising) still lands
+    # in the durable log. The handler instance is shared between the two loggers;
+    # we remember it on the per-invocation logger so close detaches exactly it and
+    # never a sibling invocation's handler.
+    providers_logger = logging.getLogger(_PROVIDERS_LOGGER_NAME)
+    providers_logger.setLevel(logging.WARNING)
+    providers_logger.addHandler(handler)
+    setattr(logger, _PROVIDER_HANDLER_ATTR, handler)
+
     logger.info("build log opened command=%s pid=%s path=%s", command, os.getpid(), path)
     return logger, path
 
@@ -113,6 +131,15 @@ def close_build_log(logger: logging.Logger) -> None:
     guarding. Detaching releases the file handle so tests can clean up their temp
     directories on every platform.
     """
+    # Detach this invocation's handler from the SHARED providers logger first, so a
+    # provider WARNING can never reach a just-closed file. Remove exactly the handler
+    # this invocation added (tracked on the logger); clear the marker so a second
+    # close is a no-op and two sequential builds never cross-contaminate files.
+    provider_handler = getattr(logger, _PROVIDER_HANDLER_ATTR, None)
+    if provider_handler is not None:
+        logging.getLogger(_PROVIDERS_LOGGER_NAME).removeHandler(provider_handler)
+        setattr(logger, _PROVIDER_HANDLER_ATTR, None)
+
     for handler in list(logger.handlers):
         try:
             handler.flush()

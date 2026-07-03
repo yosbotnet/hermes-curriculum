@@ -164,7 +164,7 @@ def ingest(
     Each source is read, split into ``chunk_lines``-line chunks (each tagged with
     the source's stable ``token`` as its grounding citation and the 1-based start
     line), and run through a GRAPH-ONLY pipeline --
-    ``Pipeline([ExtractPass, DedupePass, InferEdgesPass, VerifyPass])``. Question
+    ``Pipeline([ExtractPass, DedupePass, SpinePass, InferEdgesPass, VerifyPass])``. Question
     generation is deliberately NOT part of this pipeline (it is the separate,
     batched :func:`generate_questions` follow-up), which keeps each source to
     roughly one extract call, one edge call, and one embedding call.
@@ -226,10 +226,23 @@ def ingest(
             files += 1
             concepts += counts["concepts"]
             edges += counts["edges"]
-            log.info(
-                "stage=ingest source ok token=%s concepts=%d edges=%d",
-                token, counts["concepts"], counts["edges"],
-            )
+            if counts["concepts"] == 0:
+                # The source "succeeded" (no exception) yet produced nothing --
+                # the tell-tale of a silently failing provider whose swallowed
+                # timeouts return "" (empty completions). Log it at WARNING with a
+                # pointed hint instead of the healthy-looking INFO "source ok", so
+                # the build log does not read healthy while it produced nothing.
+                log.warning(
+                    "stage=ingest source token=%s concepts=0 edges=%d -- 0 concepts "
+                    "extracted - check provider errors above; a silently failing "
+                    "provider yields empty completions",
+                    token, counts["edges"],
+                )
+            else:
+                log.info(
+                    "stage=ingest source ok token=%s concepts=%d edges=%d",
+                    token, counts["concepts"], counts["edges"],
+                )
             concepts_by_index[index] = counts["concept_list"]
 
     # Stitch consecutive spine sources AFTER every source is ingested and

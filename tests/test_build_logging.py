@@ -19,6 +19,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from curriculum.app import build, build_logging
 from curriculum.config import Settings, load as load_settings
@@ -122,6 +123,113 @@ class IngestFailureLoggingTest(unittest.TestCase):
             self.assertIn("stage=ingest", text)
             self.assertIn("src-a", text)  # per-source identity preserved
             self.assertIn("Traceback (most recent call last)", text)  # FULL traceback
+
+
+class ProviderLoggerCaptureTest(unittest.TestCase):
+    """Issue #3 follow-up: the shared ``curriculum.providers`` logger's WARNING
+    records (a swallowed provider failure) must land in the OPEN build log's file,
+    and the invocation's handler must be attached/detached EXACTLY -- the providers
+    logger is shared across invocations, so a stale handler would cross-contaminate
+    a later build's file."""
+
+    def setUp(self) -> None:
+        self.providers_logger = logging.getLogger("curriculum.providers")
+
+    def test_provider_warning_lands_in_open_build_log(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(log_dir=directory)
+            logger, path = build_logging.start_build_log(settings, "build")
+            try:
+                self.providers_logger.warning("boom-during-build token=src-a")
+            finally:
+                build_logging.close_build_log(logger)
+            self.assertIn("boom-during-build", path.read_text(encoding="utf-8"))
+
+    def test_handler_attached_then_exactly_detached_on_close(self) -> None:
+        baseline = list(self.providers_logger.handlers)
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(log_dir=directory)
+            logger, _ = build_logging.start_build_log(settings, "build")
+            added = [h for h in self.providers_logger.handlers if h not in baseline]
+            self.assertEqual(len(added), 1)  # exactly one handler added
+            build_logging.close_build_log(logger)
+            # Back to the exact baseline -- nothing left attached, nothing removed
+            # that we did not add. Idempotent under a second close.
+            self.assertEqual(list(self.providers_logger.handlers), baseline)
+            build_logging.close_build_log(logger)
+            self.assertEqual(list(self.providers_logger.handlers), baseline)
+
+    def test_two_sequential_invocations_do_not_cross_contaminate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(log_dir=directory)
+            path1 = Path(directory) / "inv1.log"
+            path2 = Path(directory) / "inv2.log"
+            # Force distinct filenames: two builds in the same second/pid would
+            # otherwise share one path -- what we test here is handler routing.
+            with mock.patch.object(build_logging, "log_path_for", return_value=path1):
+                logger1, _ = build_logging.start_build_log(settings, "build")
+            try:
+                self.providers_logger.warning("record-one")
+            finally:
+                build_logging.close_build_log(logger1)
+            with mock.patch.object(build_logging, "log_path_for", return_value=path2):
+                logger2, _ = build_logging.start_build_log(settings, "build")
+            try:
+                self.providers_logger.warning("record-two")
+            finally:
+                build_logging.close_build_log(logger2)
+
+            text1 = path1.read_text(encoding="utf-8")
+            text2 = path2.read_text(encoding="utf-8")
+            self.assertIn("record-one", text1)
+            self.assertNotIn("record-two", text1)
+            self.assertIn("record-two", text2)
+            self.assertNotIn("record-one", text2)
+
+
+class ZeroConceptSourceLoggingTest(unittest.TestCase):
+    """A source that ingests without error but yields 0 concepts must be logged
+    at WARNING with a provider-failure hint (a silently failing provider yields
+    empty completions), not the healthy-looking INFO "source ok" line."""
+
+    def test_zero_concept_warns_and_nonzero_still_logs_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = Settings(
+                log_dir=directory,
+                api_key="test-key",
+                okf_bundle_path=str(Path(directory) / "bundle"),
+            )
+            manifest = {
+                "course": "C",
+                "chunk_lines": 150,
+                "sources": [
+                    {"path": "a", "token": "empty-src"},
+                    {"path": "b", "token": "full-src"},
+                ],
+            }
+
+            def fake_ingest_source(source, manifest, settings, content):
+                if source["token"] == "empty-src":
+                    return {"concepts": 0, "edges": 0, "concept_list": []}
+                return {"concepts": 3, "edges": 2, "concept_list": []}
+
+            logger, path = build_logging.start_build_log(settings, "ingest")
+            try:
+                with mock.patch.object(
+                    build, "_ingest_source", side_effect=fake_ingest_source
+                ):
+                    result = build.ingest(manifest, settings, logger=logger)
+            finally:
+                build_logging.close_build_log(logger)
+
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(result["files"], 2)
+            # zero-concept source: WARNING with the pointed hint, not "source ok"
+            self.assertIn("0 concepts extracted", text)
+            self.assertRegex(text, r"WARNING[^\n]*empty-src")
+            self.assertNotRegex(text, r"source ok token=empty-src")
+            # non-zero source: unchanged INFO "source ok"
+            self.assertRegex(text, r"source ok token=full-src")
 
 
 if __name__ == "__main__":

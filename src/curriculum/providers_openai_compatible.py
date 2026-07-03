@@ -10,17 +10,46 @@ nothing here is vendor-specific. Tests and dry runs use
 
 Resilience: a single failed call returns "" rather than raising, so one bad
 chunk does not abort a whole ingest (the pass then sees "no items"). Failures
-are reported to stderr with status + a short body excerpt for diagnosis.
+are reported two ways with the SAME text: a stderr print for interactive runs,
+and a WARNING on the module-level ``curriculum.providers`` logger so the durable
+build log (issue #3) captures them -- otherwise a build where every call times
+out would swallow every failure and log each source as healthy while silently
+producing nothing. The logger does NOT propagate to the root handler, so the two
+channels never double up on the console.
 """
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import urllib.error
 import urllib.request
 from typing import Sequence
 
 from .ports.providers import EmbeddingProvider, LlmProvider
+
+# Shared, module-level logger. The build-logging layer attaches its per-invocation
+# FileHandler here so swallowed provider failures reach the durable log. propagate
+# is False so a WARNING never reaches the root's last-resort stderr handler and
+# thus never duplicates the interactive print below on the console.
+_LOGGER = logging.getLogger("curriculum.providers")
+_LOGGER.propagate = False
+# A NullHandler keeps ``callHandlers`` from falling back to logging's last-resort
+# stderr handler when no build log is attached -- that fallback would print the
+# WARNING a second time next to the interactive stderr line below. The build log
+# attaches its own FileHandler alongside this no-op one.
+_LOGGER.addHandler(logging.NullHandler())
+
+
+def _report_failure(message: str) -> None:
+    """Surface a swallowed provider failure on BOTH channels with one text.
+
+    stderr keeps interactive runs visible; the ``curriculum.providers`` WARNING is
+    what the durable build log records. The message is passed as a ``%s`` argument
+    so any ``%`` in an upstream body excerpt is never treated as a format spec.
+    """
+    print(message, file=sys.stderr)
+    _LOGGER.warning("%s", message)
 
 
 class OpenAICompatibleLlm(LlmProvider):
@@ -72,22 +101,21 @@ class OpenAICompatibleLlm(LlmProvider):
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network path
+        except urllib.error.HTTPError as exc:
             self.failures += 1
             detail = exc.read().decode("utf-8", "ignore")[:200]
-            print(f"[OpenAICompatibleLlm] HTTP {exc.code}: {detail}", file=sys.stderr)
+            _report_failure(f"[OpenAICompatibleLlm] HTTP {exc.code}: {detail}")
             return ""
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:  # pragma: no cover
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             self.failures += 1
-            print(f"[OpenAICompatibleLlm] request failed: {exc}", file=sys.stderr)
+            _report_failure(f"[OpenAICompatibleLlm] request failed: {exc}")
             return ""
         try:
             return payload["choices"][0]["message"].get("content") or ""
         except (KeyError, IndexError, TypeError):  # pragma: no cover
             self.failures += 1
-            print(
-                f"[OpenAICompatibleLlm] unexpected response shape: {str(payload)[:200]}",
-                file=sys.stderr,
+            _report_failure(
+                f"[OpenAICompatibleLlm] unexpected response shape: {str(payload)[:200]}"
             )
             return ""
 
