@@ -135,7 +135,7 @@ class ContainerWiringTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repos = PostgresRepositories(conn=object())
 
-    def test_exposes_six_named_repositories(self) -> None:
+    def test_exposes_seven_named_repositories(self) -> None:
         self.assertIsInstance(self.repos.concepts, ConceptIndexRepository)
         self.assertIsInstance(self.repos.edges, EdgeRepository)
         self.assertIsInstance(self.repos.questions, QuestionRepository)
@@ -367,13 +367,16 @@ class PostgresLiveTest(unittest.TestCase):
             dst=b.id,
             type=EdgeType.PREREQUISITE,
             provenance="spine",
-            confidence=0.95,
+            # float4-exact value (like the 0.5/0.25 in test_edge_round_trip):
+            # the confidence column is real (4 bytes), so a non-representable
+            # value would make exact equality depend on psycopg's result format.
+            confidence=0.75,
         )
         self.repos.edges.upsert(e)
         self.conn.commit()
         got = self.repos.edges.get(a.id, b.id, EdgeType.PREREQUISITE)
         self.assertEqual(got.provenance, "spine")
-        self.assertEqual(got.confidence, 0.95)
+        self.assertEqual(got.confidence, 0.75)
         self.assertEqual(got, e)
 
     def test_edge_provenance_defaults_round_trip(self) -> None:
@@ -385,8 +388,9 @@ class PostgresLiveTest(unittest.TestCase):
         self.conn.commit()
         got = self.repos.edges.get(a.id, b.id, EdgeType.RELATED)
         # Entity defaults must survive a round trip (parity with the schema).
+        # 0.6 is not float4-exact, so compare with a float4-sized tolerance.
         self.assertEqual(got.provenance, "inferred")
-        self.assertEqual(got.confidence, 0.6)
+        self.assertAlmostEqual(got.confidence, 0.6, places=6)
 
     def test_retire_excludes_from_listings_but_not_get(self) -> None:
         a = self._concept("a")
