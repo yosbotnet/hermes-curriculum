@@ -16,8 +16,9 @@ optional, environment-specific dependencies. They are imported *inside* the
 functions that need them, never at module load, so ``import curriculum.app.build``
 succeeds on a machine with no database driver and no network -- which is exactly
 what lets the manifest loader (pure JSON + validation) be unit-tested offline and
-lets the rest of the test-suite import this module freely. The Nous providers and
-the ingestion passes, by contrast, are stdlib-only and safe to import eagerly.
+lets the rest of the test-suite import this module freely. The OpenAI-compatible
+providers and the ingestion passes, by contrast, are stdlib-only and safe to
+import eagerly.
 
 Standard library plus the project's own modules only.
 """
@@ -40,7 +41,10 @@ from ..ingestion.passes import (
     VerifyPass,
 )
 from ..ingestion.pipeline import Pipeline
-from ..providers_nous import NousEmbedder, NousLlm
+from ..providers_openai_compatible import (
+    OpenAICompatibleEmbedder,
+    OpenAICompatibleLlm,
+)
 from ..storage.okf_content import FileContentRepository
 
 __all__ = [
@@ -171,7 +175,7 @@ def ingest(manifest: dict, settings: Settings) -> dict:
 
     Returns aggregate counts ``{files, concepts, edges}``.
     """
-    _require_nous_key(settings)
+    _require_api_key(settings)
     # The OKF content repository is stateless (just a root path) and writes one
     # file per concept id, so a single instance is safely shared across workers.
     content = FileContentRepository(Path(settings.okf_bundle_path))
@@ -214,9 +218,14 @@ def _ingest_source(
             # 1-based start line so a citation can point back into the source.
             chunks.append({"text": text, "file": token, "line": start + 1})
 
-    llm = NousLlm(api_key=settings.nous_api_key, model=settings.ingest_model)
-    embedder = NousEmbedder(
-        api_key=settings.nous_api_key,
+    llm = OpenAICompatibleLlm(
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+        model=settings.ingest_model,
+    )
+    embedder = OpenAICompatibleEmbedder(
+        api_key=settings.api_key,
+        base_url=settings.base_url,
         model=settings.embed_model,
         dim=settings.embedding_dim,
     )
@@ -270,7 +279,7 @@ def link(settings: Settings, course: str) -> dict:
     Returns whatever counts the linker reports (e.g. inferred/persisted/still
     isolated) as a plain dict.
     """
-    _require_nous_key(settings)
+    _require_api_key(settings)
     # Both imports are deferred: the linker is the refactor of repair_emb.py and
     # the Postgres adapter is optional, so this module imports without either.
     from ..linking.embedding_linker import EmbeddingLinker
@@ -282,7 +291,11 @@ def link(settings: Settings, course: str) -> dict:
         linker = EmbeddingLinker(
             repos.concepts,
             repos.edges,
-            NousLlm(api_key=settings.nous_api_key, model=settings.ingest_model),
+            OpenAICompatibleLlm(
+                api_key=settings.api_key,
+                base_url=settings.base_url,
+                model=settings.ingest_model,
+            ),
         )
         return dict(linker.link_isolated(course))
     finally:
@@ -307,7 +320,7 @@ def generate_questions(settings: Settings, course: str) -> dict:
 
     Returns ``{questions: int}`` -- the number of questions generated/persisted.
     """
-    _require_nous_key(settings)
+    _require_api_key(settings)
     from ..storage.postgres import PostgresRepositories, connect
 
     content = FileContentRepository(Path(settings.okf_bundle_path))
@@ -415,7 +428,11 @@ def _gen_concept_batch(
         '"open|mcq|derivation", "difficulty": 1-5, "prompt": "...", "rubric": "..."}]}. '
         "Every question MUST carry the exact concept_id it tests.\n\n" + "\n".join(blocks)
     )
-    llm = NousLlm(api_key=settings.nous_api_key, model=settings.ingest_model)
+    llm = OpenAICompatibleLlm(
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+        model=settings.ingest_model,
+    )
     raw = llm.complete(prompt, system=_QGEN_SYSTEM, temperature=0.0)
 
     valid_ids = {row[0] for row in batch}
@@ -465,7 +482,11 @@ def _gen_edge_batch(
         '"<exact edge_id>", "kind": "open", "difficulty": 1-5, "hop_count": 2, '
         '"prompt": "...", "rubric": "..."}]}.\n\n' + "\n".join(blocks)
     )
-    llm = NousLlm(api_key=settings.nous_api_key, model=settings.ingest_model)
+    llm = OpenAICompatibleLlm(
+        api_key=settings.api_key,
+        base_url=settings.base_url,
+        model=settings.ingest_model,
+    )
     raw = llm.complete(prompt, system=_QGEN_SYSTEM, temperature=0.0)
 
     by_edge_id = {row[0]: row for row in batch}
@@ -549,18 +570,20 @@ def status(settings: Settings, course: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Small shared helpers.
 # --------------------------------------------------------------------------- #
-def _require_nous_key(settings: Settings) -> None:
-    """Fail early (and clearly) when the Nous key is absent.
+def _require_api_key(settings: Settings) -> None:
+    """Fail early (and clearly) when the inference API key is absent.
 
-    Every Nous-backed stage needs ``settings.nous_api_key`` (sourced from the
-    ``NOUS_API_KEY`` env var). Raising a :class:`ConfigError` up front turns a
-    later opaque auth failure -- after a connection is opened and work begins --
-    into an actionable message at the call site.
+    Every inference-backed stage needs ``settings.api_key`` (sourced from the
+    ``CURRICULUM_API_KEY`` env var, or the legacy ``NOUS_API_KEY`` fallback).
+    Raising a :class:`ConfigError` up front turns a later opaque auth failure --
+    after a connection is opened and work begins -- into an actionable message at
+    the call site.
     """
-    if not settings.nous_api_key:
+    if not settings.api_key:
         raise ConfigError(
-            "NOUS_API_KEY is not set; Nous-backed build steps need an API key "
-            "(read from settings.nous_api_key)"
+            "CURRICULUM_API_KEY is not set; inference-backed build steps need an "
+            "API key (read from settings.api_key; the legacy NOUS_API_KEY also "
+            "works)"
         )
 
 

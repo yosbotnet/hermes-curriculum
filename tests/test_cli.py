@@ -112,7 +112,7 @@ class DoctorTest(unittest.TestCase):
         # Every probe is reported, each line marked OK or MISS.
         self.assertIn("docker", printed)
         self.assertIn("database", printed)
-        self.assertIn("nous_api_key", printed)
+        self.assertIn("curriculum_api_key", printed)
         self.assertTrue("ok" in printed or "miss" in printed)
 
     def test_doctor_returns_nonzero_when_a_check_misses(self) -> None:
