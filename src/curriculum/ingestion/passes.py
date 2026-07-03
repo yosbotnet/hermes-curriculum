@@ -600,11 +600,10 @@ class SpinePass(IngestionPass):
             source_name, order_index = attribution
             if source_name not in ctx.spine_sources:
                 continue
-            first_line = min(
-                (ref.line for ref in concept.source_refs if ref.line is not None),
-                default=math.inf,
-            )
-            annotated.append((order_index, first_line, concept.id, concept))
+            # Delegate the within-source component to the shared helper so the
+            # stitch step (app/build.py) can never drift from this ordering.
+            first_line, concept_id = spine_within_source_key(concept)
+            annotated.append((order_index, first_line, concept_id, concept))
         annotated.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
         return [entry[3] for entry in annotated]
 
