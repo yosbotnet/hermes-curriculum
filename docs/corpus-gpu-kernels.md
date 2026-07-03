@@ -40,7 +40,8 @@ satellite that hangs concepts off the spine's backbone.
 
 Note on repository state: the `spine` boolean on a `corpus.json` source entry is being added
 to the ingestion pipeline as a sibling piece of work (see the project's implementation plan
-for the motivation layer). If your checkout does not yet honor `spine`, every source is
+for the motivation layer, `docs/superpowers/plans/2026-07-03-motivation-layer.md`). If your
+checkout does not yet honor `spine`, every source is
 treated as a satellite and all prerequisite edges are inferred rather than trusted; the
 example in section (f) below assumes the flag has landed.
 
@@ -96,12 +97,18 @@ of worked examples rather than a single spine textbook.
 
 **Primary satellite: Simon Boehm's CUDA matmul worklog** ("How to Optimize a CUDA Matmul
 Kernel for cuBLAS-like Performance," or search for Simon Boehm's blog post on optimizing
-CUDA matrix multiplication). It walks a single SGEMM kernel through a sequence of concrete
-optimizations -- naive, global-memory coalescing, shared-memory tiling/blocking, 1D and 2D
-thread-level tiling ("blocktiling"), vectorized memory access, warp-tiling, and double
-buffering -- each with measured throughput against a step before it. This worklog's own
-progression is exactly what the checkpoint ladder in section (e) is modeled on. Because it
-is a single blog post rather than an authored curriculum with editorially trusted chapter
+CUDA matrix multiplication). It walks a single SGEMM kernel through a sequence of concrete,
+measured optimizations -- naive, global-memory coalescing, shared-memory tiling, 1D
+blocktiling, 2D blocktiling, vectorized memory access, and warp-tiling -- each benchmarked
+against the step before it, with 1D and 2D blocktiling built and measured as two separate
+kernels rather than a single combined step. Boehm discusses double buffering (software
+pipelining of shared-memory tile loads) only as proposed future work in the post's closing
+section; no kernel implementing it is built or benchmarked there, so do not attribute a
+measured double-buffering step to this source. For an implementation of the technique, see
+the CUTLASS/CuTe documentation in the satellite list below. The measured portion of this
+worklog is what most of the checkpoint ladder in section (e) is modeled on; checkpoint 4
+(double buffering) extends that ladder one step past what Boehm actually measures. Because
+it is a single blog post rather than an authored curriculum with editorially trusted chapter
 dependencies, treat it as a satellite: its concepts should link into the graph, but do not
 mark it spine.
 
@@ -116,8 +123,10 @@ mark it spine.
   library for GEMM and related kernels; CuTe is the layout-algebra library underlying
   CUTLASS 3.x. Their documentation (in the CUTLASS GitHub repository's docs and README
   material) explains warp-level matrix-multiply-accumulate (MMA) primitives and tile
-  scheduling. Treat this as reference/satellite material you dip into once you are ready to
-  move a kernel from plain CUDA cores onto tensor cores.
+  scheduling, including the software-pipelined (double-buffered) global-to-shared-memory
+  loads that Boehm's worklog above leaves as unimplemented future work. Treat this as
+  reference/satellite material you dip into once you are ready to move a kernel from plain
+  CUDA cores onto tensor cores.
 - **Triton tutorials** -- OpenAI's Triton ships an official tutorial sequence (vector add,
   fused softmax, matrix multiplication, low-memory dropout, layer norm, fused attention).
   Useful both as a second, higher-level language for the same optimization ideas and as a

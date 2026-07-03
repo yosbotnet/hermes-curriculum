@@ -97,9 +97,9 @@ class RipenessTests(unittest.TestCase):
 
     def test_due_earlier_today_is_ready_now(self):
         # a review due at 08:00 is ready when now is 23:00 the same day.
-        late = NOW.replace(hour=23)
+        evening = NOW.replace(hour=23)
         state = LearnerState(concept_id="c", stability=5.0, due_at=NOW)
-        out = ripeness([state], late)
+        out = ripeness([state], evening)
         self.assertEqual(out["ready_now"], ["c"])
 
     def test_week_edge_is_inclusive_seven_days(self):

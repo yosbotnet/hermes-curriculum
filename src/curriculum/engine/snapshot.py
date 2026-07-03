@@ -6,7 +6,7 @@ domain state -- no clock reads, no RNG, no I/O; ``now`` (and any reference
 instant) is always injected -- so every metric is deterministic and trivially
 testable. Standard library only.
 
-The four metrics are deliberately shaped to resist gaming and debt framing:
+The four metrics are deliberately shaped to resist gaming and guilt framing:
 
 * ``stability_days`` -- a single "memory capital" number: the sum of every
   concept's retention stability WEIGHTED BY its exam importance. Weighting is
