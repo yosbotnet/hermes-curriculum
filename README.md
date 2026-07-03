@@ -28,6 +28,12 @@ cp corpus.example.json corpus.json                         # then edit it for yo
 `CURRICULUM_API_KEY` / `CURRICULUM_BASE_URL` are the primary names; the legacy `NOUS_API_KEY`
 / `NOUS_BASE_URL` still work as fallbacks (the generic names win when both are set).
 
+Starting from raw PDFs/slides instead of ready text? Run `curriculum corpus-init` to
+scaffold a `corpus.json` + `materials/` directory, extract your materials to plain text,
+then loop `curriculum corpus-validate corpus.json` until it reports zero errors before
+building. The **[AGENTS.md](AGENTS.md)** "Preparing a corpus from raw materials" section
+is the full agent runbook (extraction tools, spine rules, the validate-then-build loop).
+
 Run `.venv/bin/curriculum doctor` first to check prerequisites (docker, DB, key, bundle).
 Tests need neither a database nor a key: `make test`.
 

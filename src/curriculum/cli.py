@@ -298,6 +298,80 @@ def _cmd_flag_question(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Corpus-preparation handlers (onboarding: raw materials -> buildable corpus).
+# Each lazy-imports curriculum.app.corpus_tools, keeping --help/doctor light.
+# --------------------------------------------------------------------------- #
+def _cmd_corpus_init(args: argparse.Namespace, settings: Settings) -> int:
+    """Scaffold the starter corpus artifacts, printing each created path.
+
+    A thin shell over :func:`curriculum.app.corpus_tools.scaffold`: it creates the
+    ``materials/`` dir, a commented ``corpus.json`` template, and the materials
+    README under the target directory (default ``.``). A refusal to overwrite an
+    existing manifest surfaces as a :class:`ConfigError`, which ``main`` maps to a
+    non-zero exit -- so the scaffold never silently clobbers a corpus in progress.
+    """
+    from .app import corpus_tools
+
+    for path in corpus_tools.scaffold(args.directory):
+        print(f"created {path}")
+    print("next: put text under materials/, then run: curriculum corpus-validate corpus.json")
+    return 0
+
+
+def _render_corpus_report(report: Mapping[str, Any]) -> str:
+    """Render a validate report as a compact, ASCII, ~20-line human summary.
+
+    Errors first (they block the build), then warnings (weigh deliberately), then
+    a one-line-per-source estimate with the total extract-call count -- so the cost
+    is visible before any paid inference. Kept pure and deterministic: everything
+    it prints comes from ``report``, so an agent reads the same numbers ``--json``
+    emits.
+    """
+    lines: list[str] = []
+    errors = report["errors"]
+    warnings = report["warnings"]
+    if errors:
+        lines.append(f"ERRORS ({len(errors)}):")
+        lines.extend(f"  - {message}" for message in errors)
+    else:
+        lines.append("ERRORS: none")
+    if warnings:
+        lines.append(f"WARNINGS ({len(warnings)}):")
+        lines.extend(f"  - {message}" for message in warnings)
+    for source in report["sources"]:
+        lines.append(
+            f"  {source['status']:>7}  {source['token']}: "
+            f"{source['lines']} lines -> {source['chunks']} chunks"
+        )
+    estimate = report["estimate"]
+    lines.append(
+        f"estimate: {estimate.get('chunks', 0)} chunks -> "
+        f"{estimate.get('extract_calls', 0)} extract calls "
+        f"(chunk_lines={estimate.get('chunk_lines')})"
+    )
+    return "\n".join(lines)
+
+
+def _cmd_corpus_validate(args: argparse.Namespace, settings: Settings) -> int:
+    """Validate a corpus manifest and its sources; non-zero exit iff errors exist.
+
+    ``--json`` emits the raw report (same contract an agent loops against);
+    otherwise a compact human render is printed. Returns 1 when the report carries
+    any errors so the command doubles as a scriptable readiness gate (warnings do
+    not fail it -- they are for deliberate review), matching how ``doctor`` uses a
+    non-zero code for "not ready".
+    """
+    from .app import corpus_tools
+
+    report = corpus_tools.validate(args.manifest)
+    if args.json:
+        _emit(report)
+    else:
+        print(_render_corpus_report(report))
+    return 1 if report["errors"] else 0
+
+
+# --------------------------------------------------------------------------- #
 # Serve-side and registration handlers.
 # --------------------------------------------------------------------------- #
 def _cmd_serve(args: argparse.Namespace, settings: Settings) -> int:
@@ -537,6 +611,27 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_build.add_argument("manifest", help="path to the corpus manifest JSON")
     p_build.set_defaults(func=_cmd_build)
+
+    p_corpus_init = sub.add_parser(
+        "corpus-init", help="scaffold a starter corpus.json + materials/ directory"
+    )
+    p_corpus_init.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="target directory for the scaffold (default: current directory)",
+    )
+    p_corpus_init.set_defaults(func=_cmd_corpus_init)
+
+    p_corpus_validate = sub.add_parser(
+        "corpus-validate",
+        help="check a corpus.json + its source files before building",
+    )
+    p_corpus_validate.add_argument("manifest", help="path to the corpus manifest JSON")
+    p_corpus_validate.add_argument(
+        "--json", action="store_true", help="emit the raw report as JSON"
+    )
+    p_corpus_validate.set_defaults(func=_cmd_corpus_validate)
 
     p_check = sub.add_parser(
         "check",

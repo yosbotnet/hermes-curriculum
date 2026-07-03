@@ -267,6 +267,80 @@ class RenderCheckTest(unittest.TestCase):
         self.assertIn("Unlocked: 0 new concept(s)", rendered)
 
 
+class CorpusInitTest(unittest.TestCase):
+    """``corpus-init`` scaffolds the starter artifacts and prints their paths.
+
+    Offline and side-effect-contained: it only writes into a temp directory, so
+    the test exercises the real scaffold with no monkeypatching."""
+
+    def test_corpus_init_scaffolds_and_prints_paths(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            with redirect_stdout(out):
+                code = cli.main(["corpus-init", directory])
+            self.assertEqual(code, 0)
+            self.assertTrue((Path(directory) / "corpus.json").is_file())
+            self.assertTrue((Path(directory) / "materials").is_dir())
+            printed = out.getvalue()
+            self.assertIn("corpus.json", printed)
+
+    def test_corpus_init_refuses_overwrite_returns_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "corpus.json").write_text("{}", encoding="utf-8")
+            with redirect_stderr(io.StringIO()):
+                code = cli.main(["corpus-init", directory])
+            self.assertNotEqual(code, 0)
+
+
+class CorpusValidateTest(unittest.TestCase):
+    """``corpus-validate`` renders the report and maps errors to the exit code."""
+
+    def _manifest(self, directory: str, sources: list[dict]) -> str:
+        manifest = Path(directory) / "corpus.json"
+        manifest.write_text(
+            json.dumps({"course": "C", "chunk_lines": 150, "sources": sources}),
+            encoding="utf-8",
+        )
+        return str(manifest)
+
+    def test_validate_clean_corpus_returns_zero(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "a.txt").write_text(
+                "\n".join(f"line {i} teaching text" for i in range(300)),
+                encoding="utf-8",
+            )
+            manifest = self._manifest(
+                directory, [{"path": "a.txt", "token": "a", "spine": True}]
+            )
+            with redirect_stdout(out):
+                code = cli.main(["corpus-validate", manifest])
+            self.assertEqual(code, 0)
+
+    def test_validate_with_errors_returns_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = self._manifest(
+                directory, [{"path": "gone.txt", "token": "g"}]
+            )
+            with redirect_stdout(io.StringIO()):
+                code = cli.main(["corpus-validate", manifest])
+            self.assertNotEqual(code, 0)
+
+    def test_validate_json_emits_the_report(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = self._manifest(
+                directory, [{"path": "gone.txt", "token": "g"}]
+            )
+            with redirect_stdout(out):
+                code = cli.main(["corpus-validate", manifest, "--json"])
+            self.assertNotEqual(code, 0)
+            report = json.loads(out.getvalue())
+            for key in ("errors", "warnings", "sources", "estimate"):
+                self.assertIn(key, report)
+            self.assertTrue(report["errors"])
+
+
 class FlagQuestionTest(unittest.TestCase):
     def test_flag_question_calls_service_and_returns_zero(self) -> None:
         fake = _FakeService(flag_result={"question_id": "q1", "status": "retired"})

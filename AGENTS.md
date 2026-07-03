@@ -113,6 +113,38 @@ bundle). It exits non-zero if anything is missing, so it doubles as a scriptable
    `execv`s
    `python -m curriculum.mcp.server` and speaks MCP over stdio.
 
+## Preparing a corpus from raw materials (agent runbook)
+
+You are the agent operating this repo, and the user hands you raw materials (PDFs,
+slide decks, docx, lecture notes). The build ingests only **plain UTF-8 text**, so
+your job is to turn those materials into text files plus a `corpus.json`. Loop until
+`corpus-validate` is clean, then build.
+
+1. **Scaffold.** `curriculum corpus-init` (writes `materials/`, a commented
+   `corpus.json` template, and `materials/README.txt`; it refuses to overwrite an
+   existing `corpus.json`).
+2. **Extract text.** These tools are NOT assumed installed -- check first (e.g.
+   `command -v pdftotext`) and tell the user if one is missing:
+   - PDF: `pdftotext -layout in.pdf out.txt`, or PyMuPDF (`python -c "import fitz"`).
+   - docx / epub / pptx: `pandoc in.docx -t plain -o out.txt`.
+3. **Clean.** Strip page furniture -- running headers/footers, page numbers, slide
+   chrome -- so the extract reads as prose, not scanned layout noise.
+4. **Name meaningfully.** One file per unit under `materials/`; give each source a
+   short stable `token` (the grounding citation), e.g. `chapter-03-routing`.
+5. **Mark the spine.** Set `"spine": true` on the source whose ordering is
+   editorially vetted (a textbook's chapter sequence). Its concepts chain into
+   trusted prerequisite edges in document order; inference may only add
+   lower-confidence cross-links. A multi-file spine **is** chained across files in
+   manifest order (they are stitched), so per-chapter files work; a single
+   concatenated file works too. Everything else (lectures, tutorials) is a separate
+   satellite source with no `spine` flag.
+6. **Loop the validator.** `curriculum corpus-validate corpus.json` until it reports
+   zero errors (it flags missing files, still-binary PDF/zip, non-UTF-8, empty, and
+   suspiciously short sources, and estimates the extract-call cost). Review the
+   warnings deliberately -- a "no spine" warning may be intentional, a "short" one
+   usually means an extract failed. `--json` gives the machine-readable report.
+7. **Build.** `curriculum build corpus.json` once validation is clean.
+
 ## How it works
 
 **The OKF / Postgres split (polyglot, single-ownership).** Two stores, neither
@@ -187,6 +219,8 @@ the OKF bundle are removed, so the next `curriculum build` starts clean.
 | Command                         | What it does |
 |---------------------------------|--------------|
 | `curriculum doctor`             | Check prerequisites (docker, DB, key, bundle); non-zero if any miss. |
+| `curriculum corpus-init [dir]`  | Scaffold a starter `corpus.json` + `materials/` dir (never clobbers). |
+| `curriculum corpus-validate <manifest> [--json]` | Check a manifest + its source files before building; non-zero if errors. |
 | `curriculum db-up` / `db-down`  | Start / stop the Postgres+pgvector container. |
 | `curriculum ingest <manifest>`  | Ingest a manifest's sources into the concept/edge graph. |
 | `curriculum link [--course C]`  | Link isolated concepts via embedding-guided edge repair. |
