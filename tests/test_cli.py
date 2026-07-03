@@ -180,6 +180,40 @@ class RenderCheckTest(unittest.TestCase):
         payload = dict(_CHECK_PAYLOAD, delta_since_last_check=None)
         rendered = cli._render_check(payload)
         self.assertIn("first check", rendered)
+        # The unconditional lines must hold on this branch too.
+        lines = rendered.splitlines()
+        self.assertTrue(any(line.startswith("Knowledge held:") for line in lines))
+        self.assertTrue(any(line.startswith("Ready today:") for line in lines))
+        self.assertTrue(any(line.startswith("Unlocked:") for line in lines))
+
+    def test_render_check_omits_verge_line_without_one_away(self) -> None:
+        # No one_away rows -> the "On the verge" line must not appear at all.
+        payload = dict(
+            _CHECK_PAYLOAD,
+            near_unlocks=[{"concept_id": "c9", "missing": 2, "one_away": False}],
+        )
+        rendered = cli._render_check(payload)
+        self.assertNotIn("On the verge", rendered)
+        payload = dict(_CHECK_PAYLOAD, near_unlocks=[])
+        rendered = cli._render_check(payload)
+        self.assertNotIn("On the verge", rendered)
+
+    def test_render_check_formats_negative_delta_and_zero_counts(self) -> None:
+        payload = dict(
+            _CHECK_PAYLOAD,
+            delta_since_last_check=-3.2,
+            ripeness={
+                "ready_now": [],
+                "ready_tomorrow": [],
+                "ready_this_week": [],
+                "holding": [],
+            },
+            unlocks_ready=[],
+        )
+        rendered = cli._render_check(payload)
+        self.assertIn("(-3.2 since last check)", rendered)
+        self.assertIn("Ready today: 0", rendered)
+        self.assertIn("Unlocked: 0 new concept(s)", rendered)
 
 
 class FlagQuestionTest(unittest.TestCase):
