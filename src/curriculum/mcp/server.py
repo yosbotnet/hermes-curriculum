@@ -63,7 +63,16 @@ __all__ = [
 
 # The stable public name of every tool this server exposes. Kept as data so the
 # wiring and the tests assert against one source of truth.
-TOOL_NAMES: tuple[str, ...] = ("next", "explain", "quiz", "grade", "state")
+TOOL_NAMES: tuple[str, ...] = (
+    "next",
+    "explain",
+    "quiz",
+    "grade",
+    "state",
+    "checkin",
+    "frontier",
+    "flag_question",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -202,11 +211,33 @@ def _call_state(service: CurriculumService, course: str) -> dict[str, Any]:
     return dict(service.state(course))
 
 
+def _call_checkin(service: CurriculumService, course: str) -> dict[str, Any]:
+    """The honest game-state reading. The service payload is already a plain
+    JSON-able mapping, so the router only coerces the outer Mapping to a dict."""
+    return dict(service.checkin(course))
+
+
+def _call_frontier(
+    service: CurriculumService, course: str, focus: str | None = None
+) -> dict[str, Any]:
+    """The strategy buckets for a course, optionally scoped by ``focus``. The
+    payload is a JSON-able mapping of buckets; coerce only the outer Mapping."""
+    return dict(service.frontier(course, focus=focus))
+
+
+def _call_flag_question(
+    service: CurriculumService, question_id: str, reason: str = ""
+) -> dict[str, Any]:
+    """The item kill switch: retire a question. Returns the JSON-able status
+    mapping, coerced to a plain dict for the wire."""
+    return dict(service.flag_question(question_id, reason=reason))
+
+
 # --------------------------------------------------------------------------- #
 # MCP wiring (the only part that touches the SDK).
 # --------------------------------------------------------------------------- #
 def build_server(service: CurriculumService) -> Any:
-    """Build a FastMCP server exposing ``service`` as the five curriculum tools.
+    """Build a FastMCP server exposing ``service`` as the eight curriculum tools.
 
     Each registered handler is a thin closure over ``service`` that defers to a
     pure ``_call_*`` router (above). The return annotations are deliberately
@@ -286,6 +317,44 @@ def build_server(service: CurriculumService) -> Any:
     )
     def state_tool(course: str):  # noqa: ANN202
         return _call_state(service, course)
+
+    @server.tool(
+        name="checkin",
+        description=(
+            "Return the honest game-state reading for a course: importance-"
+            "weighted memory capital (stability_days), its delta since the last "
+            "check, consolidation and ripeness, the concepts ready to unlock, "
+            "the near-unlocks, and the mastery breakdown. Logs one 'check' "
+            "engagement event so the next check can diff against it."
+        ),
+    )
+    def checkin_tool(course: str):  # noqa: ANN202
+        return _call_checkin(service, course)
+
+    @server.tool(
+        name="frontier",
+        description=(
+            "Return up to three strategy buckets for what to pursue next: 'push' "
+            "(the best new concept to start), 'reinforce' (the review with the "
+            "weakest recall right now) and 'breakthrough' (the nearest locked "
+            "concept). Optional 'focus' scopes the buckets to one topic/module. "
+            "A pure read: it consumes no candidate and advances nothing -- "
+            "choosing happens later via next/quiz."
+        ),
+    )
+    def frontier_tool(course: str, focus: str | None = None):  # noqa: ANN202
+        return _call_frontier(service, course, focus)
+
+    @server.tool(
+        name="flag_question",
+        description=(
+            "Retire a question so it is never served again (the item kill "
+            "switch), logging an 'item_flag' engagement event with the optional "
+            "reason. Returns the question id and its 'retired' status."
+        ),
+    )
+    def flag_question_tool(question_id: str, reason: str = ""):  # noqa: ANN202
+        return _call_flag_question(service, question_id, reason)
 
     return server
 

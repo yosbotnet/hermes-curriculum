@@ -15,15 +15,57 @@ The load-bearing properties asserted here:
   ``SystemExit`` into a return code.
 * a bare invocation prints usage instead of crashing.
 * ``doctor`` runs end to end (every probe isolated) and reports a checklist.
+* ``check`` and ``flag-question`` drive the service through the composition
+  root, which is monkeypatched to a fake in-memory service (same isolation
+  principle as the ``doctor`` database probe) so no Postgres connection or
+  OKF bundle is ever touched.
 """
 from __future__ import annotations
 
 import io
+import json
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from curriculum import cli
+
+
+class _FakeService:
+    """A minimal stand-in for CurriculumApplicationService: only the two
+    methods the CLI's motivation-layer commands call, recording their
+    arguments so tests can assert on what the CLI passed through."""
+
+    def __init__(self, checkin_payload=None, flag_result=None):
+        self.checkin_payload = checkin_payload
+        self.flag_result = flag_result
+        self.checkin_calls: list[str] = []
+        self.flag_calls: list[tuple[str, str]] = []
+
+    def checkin(self, course):
+        self.checkin_calls.append(course)
+        return self.checkin_payload
+
+    def flag_question(self, question_id, *, reason=""):
+        self.flag_calls.append((question_id, reason))
+        return self.flag_result
+
+
+_CHECK_PAYLOAD = {
+    "course": "cyber-101",
+    "stability_days": 42.7,
+    "delta_since_last_check": 3.2,
+    "consolidation": {"holding": 12, "reviewed_since": 4},
+    "ripeness": {
+        "ready_now": ["c1", "c2"],
+        "ready_tomorrow": ["c3"],
+        "ready_this_week": ["c4", "c5", "c6"],
+        "holding": ["c7"],
+    },
+    "unlocks_ready": ["c8"],
+    "near_unlocks": [{"concept_id": "c9", "missing": 1, "one_away": True}],
+    "by_mastery": {"new": 2, "learning": 3, "solid": 4, "exam_ready": 1},
+}
 
 
 class HelpAndUsageTest(unittest.TestCase):
@@ -82,6 +124,112 @@ class DoctorTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 code = cli.main(["doctor"])
         self.assertNotEqual(code, 0)
+
+
+class CheckTest(unittest.TestCase):
+    def test_check_prints_gain_framed_report_and_returns_zero(self) -> None:
+        fake = _FakeService(checkin_payload=_CHECK_PAYLOAD)
+        out = io.StringIO()
+        with mock.patch(
+            "curriculum.application.composition.build_service", return_value=fake
+        ):
+            with redirect_stdout(out):
+                code = cli.main(["check", "--course", "cyber-101"])
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.checkin_calls, ["cyber-101"])
+        printed = out.getvalue()
+        lines = printed.splitlines()
+        self.assertTrue(any(line.startswith("Knowledge held:") for line in lines))
+        self.assertTrue(any(line.startswith("Ready today:") for line in lines))
+        self.assertTrue(any(line.startswith("Unlocked:") for line in lines))
+        # Gain-framed: never render this as a list of obligations.
+        lowered = printed.lower()
+        for banned in ("overdue", "debt", "behind", "late"):
+            self.assertNotIn(banned, lowered)
+
+    def test_check_json_emits_raw_payload(self) -> None:
+        fake = _FakeService(checkin_payload=_CHECK_PAYLOAD)
+        out = io.StringIO()
+        with mock.patch(
+            "curriculum.application.composition.build_service", return_value=fake
+        ):
+            with redirect_stdout(out):
+                code = cli.main(["check", "--course", "cyber-101", "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), _CHECK_PAYLOAD)
+
+
+class RenderCheckTest(unittest.TestCase):
+    """_render_check is a small pure function: exercise it directly, no CLI,
+    no service, so its output contract is pinned independent of wiring."""
+
+    def test_render_check_includes_required_lines(self) -> None:
+        rendered = cli._render_check(_CHECK_PAYLOAD)
+        lines = rendered.splitlines()
+        self.assertLessEqual(len(lines), 12)
+        self.assertTrue(any(line.startswith("Knowledge held:") for line in lines))
+        self.assertTrue(any(line.startswith("Ready today:") for line in lines))
+        self.assertTrue(any(line.startswith("Unlocked:") for line in lines))
+        lowered = rendered.lower()
+        for banned in ("overdue", "debt", "behind", "late"):
+            self.assertNotIn(banned, lowered)
+        # Plain ASCII only.
+        rendered.encode("ascii")
+
+    def test_render_check_handles_first_check_with_no_delta(self) -> None:
+        payload = dict(_CHECK_PAYLOAD, delta_since_last_check=None)
+        rendered = cli._render_check(payload)
+        self.assertIn("first check", rendered)
+        # The unconditional lines must hold on this branch too.
+        lines = rendered.splitlines()
+        self.assertTrue(any(line.startswith("Knowledge held:") for line in lines))
+        self.assertTrue(any(line.startswith("Ready today:") for line in lines))
+        self.assertTrue(any(line.startswith("Unlocked:") for line in lines))
+
+    def test_render_check_omits_verge_line_without_one_away(self) -> None:
+        # No one_away rows -> the "On the verge" line must not appear at all.
+        payload = dict(
+            _CHECK_PAYLOAD,
+            near_unlocks=[{"concept_id": "c9", "missing": 2, "one_away": False}],
+        )
+        rendered = cli._render_check(payload)
+        self.assertNotIn("On the verge", rendered)
+        payload = dict(_CHECK_PAYLOAD, near_unlocks=[])
+        rendered = cli._render_check(payload)
+        self.assertNotIn("On the verge", rendered)
+
+    def test_render_check_formats_negative_delta_and_zero_counts(self) -> None:
+        payload = dict(
+            _CHECK_PAYLOAD,
+            delta_since_last_check=-3.2,
+            ripeness={
+                "ready_now": [],
+                "ready_tomorrow": [],
+                "ready_this_week": [],
+                "holding": [],
+            },
+            unlocks_ready=[],
+        )
+        rendered = cli._render_check(payload)
+        self.assertIn("(-3.2 since last check)", rendered)
+        self.assertIn("Ready today: 0", rendered)
+        self.assertIn("Unlocked: 0 new concept(s)", rendered)
+
+
+class FlagQuestionTest(unittest.TestCase):
+    def test_flag_question_calls_service_and_returns_zero(self) -> None:
+        fake = _FakeService(flag_result={"question_id": "q1", "status": "retired"})
+        out = io.StringIO()
+        with mock.patch(
+            "curriculum.application.composition.build_service", return_value=fake
+        ):
+            with redirect_stdout(out):
+                code = cli.main(["flag-question", "q1", "--reason", "ambiguous"])
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.flag_calls, [("q1", "ambiguous")])
+        self.assertEqual(
+            json.loads(out.getvalue()), {"question_id": "q1", "status": "retired"}
+        )
 
 
 if __name__ == "__main__":

@@ -222,6 +222,20 @@ class EdgeRepositoryTest(unittest.TestCase):
         self.assertEqual(original.exposure_count, 0)
         self.assertIsNone(original.last_traversed)
 
+    def test_round_trip_preserves_provenance_and_confidence(self) -> None:
+        e = Edge(
+            src="a",
+            dst="b",
+            type=EdgeType.PREREQUISITE,
+            provenance="spine",
+            confidence=0.95,
+        )
+        self.repo.upsert(e)
+        got = self.repo.get("a", "b", EdgeType.PREREQUISITE)
+        self.assertEqual(got.provenance, "spine")
+        self.assertEqual(got.confidence, 0.95)
+        self.assertEqual(got, e)
+
 
 class QuestionRepositoryTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -260,6 +274,43 @@ class QuestionRepositoryTest(unittest.TestCase):
     def test_by_edge_none_does_not_match_unlinked(self) -> None:
         self.repo.upsert(Question(id="q3", concept_id="a", edge_id=None))
         self.assertEqual(self.repo.by_edge("a::related::b"), [])
+
+    def test_retire_excludes_from_by_concept(self) -> None:
+        self.repo.upsert(Question(id="q1", concept_id="a"))
+        self.repo.upsert(Question(id="q2", concept_id="a"))
+        self.repo.retire("q1")
+        # The kill switch: a retired question is never served again.
+        self.assertEqual([q.id for q in self.repo.by_concept("a")], ["q2"])
+
+    def test_retire_excludes_from_by_edge(self) -> None:
+        self.repo.upsert(Question(id="q1", concept_id="a", edge_id="a::related::b"))
+        self.repo.upsert(Question(id="q2", concept_id="a", edge_id="a::related::b"))
+        self.repo.retire("q1")
+        self.assertEqual([q.id for q in self.repo.by_edge("a::related::b")], ["q2"])
+
+    def test_retire_still_returned_by_get(self) -> None:
+        self.repo.upsert(Question(id="q1", concept_id="a"))
+        self.repo.retire("q1")
+        # get() is the audit path: the row still exists, now marked retired.
+        got = self.repo.get("q1")
+        self.assertIsNotNone(got)
+        self.assertEqual(got.status, "retired")
+
+    def test_retire_is_idempotent(self) -> None:
+        self.repo.upsert(Question(id="q1", concept_id="a"))
+        self.repo.retire("q1")
+        self.repo.retire("q1")  # second call must be a no-op, not an error
+        self.assertEqual(self.repo.get("q1").status, "retired")
+
+    def test_retire_missing_id_is_noop(self) -> None:
+        self.repo.retire("ghost")  # unknown id: no-op, must not raise
+        self.assertIsNone(self.repo.get("ghost"))
+
+    def test_by_concept_excludes_preexisting_retired_status(self) -> None:
+        # A question upserted already-retired is filtered just the same.
+        self.repo.upsert(Question(id="q1", concept_id="a", status="retired"))
+        self.repo.upsert(Question(id="q2", concept_id="a"))
+        self.assertEqual([q.id for q in self.repo.by_concept("a")], ["q2"])
 
 
 class LearnerStateRepositoryTest(unittest.TestCase):

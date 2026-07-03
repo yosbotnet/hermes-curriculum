@@ -35,6 +35,7 @@ from ..domain.entities import (
     ReviewEvent,
 )
 from ..domain.enums import EdgeType
+from ..domain.telemetry import EngagementEvent
 from ..ports.repositories import (
     ConceptIndexRepository,
     ContentRepository,
@@ -43,6 +44,7 @@ from ..ports.repositories import (
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
+    TelemetryRepository,
 )
 
 __all__ = [
@@ -51,6 +53,7 @@ __all__ = [
     "InMemoryQuestionRepository",
     "InMemoryLearnerStateRepository",
     "InMemoryReviewLogRepository",
+    "InMemoryTelemetryRepository",
     "InMemoryCourseProfileRepository",
     "InMemoryContentRepository",
 ]
@@ -230,10 +233,12 @@ class InMemoryQuestionRepository(QuestionRepository):
         hop_count: int | None = None,
     ) -> Sequence[Question]:
         # Optional filters are exact-match and independent (AND semantics).
+        # Retired questions are the kill switch: never served, so never listed.
         out = [
             q
             for q in self._questions.values()
             if q.concept_id == concept_id
+            and q.status != "retired"
             and (difficulty is None or q.difficulty == difficulty)
             and (hop_count is None or q.hop_count == hop_count)
         ]
@@ -241,9 +246,27 @@ class InMemoryQuestionRepository(QuestionRepository):
         return out
 
     def by_edge(self, edge_id: str) -> Sequence[Question]:
-        out = [q for q in self._questions.values() if q.edge_id == edge_id]
+        # Retired questions are excluded here too (the kill switch is global).
+        out = [
+            q
+            for q in self._questions.values()
+            if q.edge_id == edge_id and q.status != "retired"
+        ]
         out.sort(key=lambda q: q.id)
         return out
+
+    def retire(self, question_id: str) -> None:
+        """Mark a question retired so it is never served again.
+
+        Idempotent and total: a no-op if the id is unknown (matching ``get``'s
+        tolerance of missing ids) or already retired. The stored value object is
+        frozen, so we ``replace`` it with a status-flipped copy rather than
+        mutating in place; the row survives (``get`` still returns it) but drops
+        out of ``by_concept``/``by_edge``."""
+        current = self._questions.get(question_id)
+        if current is None:
+            return
+        self._questions[question_id] = replace(current, status="retired")
 
 
 class InMemoryLearnerStateRepository(LearnerStateRepository):
@@ -300,6 +323,38 @@ class InMemoryReviewLogRepository(ReviewLogRepository):
     def by_concept(self, concept_id: str) -> Sequence[ReviewEvent]:
         # Preserve append order: the log is a time series for one concept.
         return [e for e in self._events if e.concept_id == concept_id]
+
+
+class InMemoryTelemetryRepository(TelemetryRepository):
+    """Append-only engagement log, the motivation layer's raw signal.
+
+    Mirrors the Postgres ``engagement_log`` table. Events are kept in append
+    order (a plain list, like the review log); ``last`` recomputes the most
+    recent event of a kind/course on read, ordering by the event's ``at`` rather
+    than by insertion order so out-of-order appends still resolve correctly."""
+
+    def __init__(self) -> None:
+        self._events: list[EngagementEvent] = []
+
+    def append(self, event: EngagementEvent) -> None:
+        self._events.append(event)
+
+    def last(self, kind: str, course: str) -> EngagementEvent | None:
+        # Most recent by `at`; an exact `at` tie is broken toward the
+        # later-appended event (index), mirroring Postgres ORDER BY at DESC,
+        # id DESC LIMIT 1 where id is the monotonic bigserial.
+        matches = [
+            (i, e)
+            for i, e in enumerate(self._events)
+            if e.kind == kind and e.course == course
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda pair: (pair[1].at, pair[0]))[1]
+
+    def list_by_course(self, course: str) -> Sequence[EngagementEvent]:
+        # Preserve append order: the log is a course-scoped time series.
+        return [e for e in self._events if e.course == course]
 
 
 class InMemoryCourseProfileRepository(CourseProfileRepository):

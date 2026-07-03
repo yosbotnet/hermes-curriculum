@@ -117,7 +117,7 @@ authoritative for the same fact, so nothing drifts:
   fit, exploration, interleave penalty, coverage) that picks the single best next action.
 
 **The build pipeline** (`curriculum.app.build`, driven by the CLI): `ingest` runs each
-source through a graph-only multipass pipeline (extract -> dedupe -> infer-edges -> verify),
+source through a graph-only multipass pipeline (extract -> dedupe -> spine -> infer-edges -> verify),
 `link` connects still-isolated concepts via embedding-guided nearest-neighbour edge repair,
 and `questions` generates batched single-concept and multi-hop exam questions over the
 persisted graph.

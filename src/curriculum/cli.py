@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, Mapping
 
 from .config import Settings
 from .config import load as load_settings
@@ -169,6 +170,76 @@ def _cmd_build(args: argparse.Namespace, settings: Settings) -> int:
             "result": build.generate_questions(settings, course),
         }
     )
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Motivation-layer command handlers (each lazy-imports the composition root).
+# --------------------------------------------------------------------------- #
+def _render_check(payload: Mapping[str, Any]) -> str:
+    """Render a ``checkin`` payload as the 30-second, gain-framed check-in.
+
+    Pure and deterministic: no I/O, no service call -- everything it needs is
+    already in ``payload``. Every line reports something the learner HAS
+    (stability held, concepts unlocked, reviews ripe for today) rather than
+    something owed, so this must never read like a list of obligations.
+    """
+    course = payload["course"]
+    stability = payload["stability_days"]
+    delta = payload.get("delta_since_last_check")
+    consolidation = payload["consolidation"]
+    ripe = payload["ripeness"]
+    unlocks_ready = payload["unlocks_ready"]
+    near_unlocks = payload["near_unlocks"]
+
+    lines = [f"Course: {course}"]
+    if delta is None:
+        lines.append(f"Knowledge held: {stability:.1f} stability-days (first check)")
+    else:
+        sign = "+" if delta >= 0 else ""
+        lines.append(
+            f"Knowledge held: {stability:.1f} stability-days "
+            f"({sign}{delta:.1f} since last check)"
+        )
+    lines.append(
+        f"Holding steady: {consolidation['holding']} concept(s), "
+        f"{consolidation['reviewed_since']} reviewed since last check"
+    )
+    lines.append(
+        f"Ready today: {len(ripe['ready_now'])} "
+        f"(tomorrow: {len(ripe['ready_tomorrow'])}, "
+        f"this week: {len(ripe['ready_this_week'])})"
+    )
+    lines.append(f"Unlocked: {len(unlocks_ready)} new concept(s) available to start")
+    one_away = sum(1 for row in near_unlocks if row["one_away"])
+    if one_away:
+        lines.append(f"On the verge: {one_away} concept(s) one step from unlocking")
+    return "\n".join(lines)
+
+
+def _cmd_check(args: argparse.Namespace, settings: Settings) -> int:
+    """The 30-second deterministic check-in: no LLM, instant, gain-framed.
+
+    ``--json`` bypasses the human render entirely and emits the raw payload,
+    so an agent can consume the same numbers a human reads on screen.
+    """
+    from .application.composition import build_service
+
+    service = build_service(settings)
+    payload = service.checkin(_course(args, settings))
+    if args.json:
+        _emit(payload)
+    else:
+        print(_render_check(payload))
+    return 0
+
+
+def _cmd_flag_question(args: argparse.Namespace, settings: Settings) -> int:
+    """Retire a question so it is never served again (the kill switch)."""
+    from .application.composition import build_service
+
+    service = build_service(settings)
+    _emit(service.flag_question(args.question_id, reason=args.reason))
     return 0
 
 
@@ -388,6 +459,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_build.add_argument("manifest", help="path to the corpus manifest JSON")
     p_build.set_defaults(func=_cmd_build)
+
+    p_check = sub.add_parser(
+        "check",
+        parents=[course_parent],
+        help="30-second gain-framed check-in (no LLM)",
+    )
+    p_check.add_argument(
+        "--json", action="store_true", help="emit the raw payload as JSON"
+    )
+    p_check.set_defaults(func=_cmd_check)
+
+    p_flag_question = sub.add_parser(
+        "flag-question", help="retire a question so it is never served again"
+    )
+    p_flag_question.add_argument("question_id", help="id of the question to retire")
+    p_flag_question.add_argument(
+        "--reason", default="", help="optional reason for the flag"
+    )
+    p_flag_question.set_defaults(func=_cmd_flag_question)
 
     p_serve = sub.add_parser("serve", help="run the stdio MCP server (for Hermes)")
     p_serve.set_defaults(func=_cmd_serve)

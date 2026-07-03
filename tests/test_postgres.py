@@ -31,6 +31,7 @@ from curriculum.domain.entities import (
     SourceRef,
 )
 from curriculum.domain.enums import EdgeType, FsrsRating, Mastery
+from curriculum.domain.telemetry import EngagementEvent
 from curriculum.ports.repositories import (
     ConceptIndexRepository,
     CourseProfileRepository,
@@ -38,6 +39,7 @@ from curriculum.ports.repositories import (
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
+    TelemetryRepository,
 )
 from curriculum.storage import postgres
 from curriculum.storage.postgres import (
@@ -48,11 +50,15 @@ from curriculum.storage.postgres import (
     PostgresQuestionRepository,
     PostgresRepositories,
     PostgresReviewLogRepository,
+    PostgresTelemetryRepository,
     connect,
     psycopg,
 )
 
 _SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "001_init.sql"
+# The motivation layer's DDL (question.status, edge.provenance/confidence,
+# engagement_log) lives in a second migration applied on top of the base schema.
+_SCHEMA2 = Path(__file__).resolve().parents[1] / "schema" / "002_motivation.sql"
 _LIVE = psycopg is not None and bool(os.environ.get("CURRICULUM_PG_TEST"))
 
 
@@ -72,6 +78,7 @@ class ImportContractTest(unittest.TestCase):
         self.assertTrue(issubclass(PostgresQuestionRepository, QuestionRepository))
         self.assertTrue(issubclass(PostgresLearnerStateRepository, LearnerStateRepository))
         self.assertTrue(issubclass(PostgresReviewLogRepository, ReviewLogRepository))
+        self.assertTrue(issubclass(PostgresTelemetryRepository, TelemetryRepository))
         self.assertTrue(issubclass(PostgresCourseProfileRepository, CourseProfileRepository))
 
 
@@ -128,12 +135,13 @@ class ContainerWiringTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repos = PostgresRepositories(conn=object())
 
-    def test_exposes_six_named_repositories(self) -> None:
+    def test_exposes_seven_named_repositories(self) -> None:
         self.assertIsInstance(self.repos.concepts, ConceptIndexRepository)
         self.assertIsInstance(self.repos.edges, EdgeRepository)
         self.assertIsInstance(self.repos.questions, QuestionRepository)
         self.assertIsInstance(self.repos.learner_state, LearnerStateRepository)
         self.assertIsInstance(self.repos.review_log, ReviewLogRepository)
+        self.assertIsInstance(self.repos.telemetry, TelemetryRepository)
         self.assertIsInstance(self.repos.profiles, CourseProfileRepository)
 
     def test_repositories_share_the_one_connection(self) -> None:
@@ -159,8 +167,11 @@ class PostgresLiveTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.conn = connect(os.environ["CURRICULUM_DB_URL"])
-        # DDL script: no params -> psycopg can run the multi-statement file.
+        # DDL scripts: no params -> psycopg can run the multi-statement files.
+        # 002 is idempotent (ADD COLUMN/CREATE ... IF NOT EXISTS) and adds the
+        # motivation-layer columns/table this suite now exercises.
         cls.conn.execute(_SCHEMA.read_text())
+        cls.conn.execute(_SCHEMA2.read_text())
         cls.conn.commit()
         cls.repos = PostgresRepositories(cls.conn)
 
@@ -346,6 +357,96 @@ class PostgresLiveTest(unittest.TestCase):
             [q.id for q in self.repos.questions.by_concept(a.id, hop_count=1)], [q1.id]
         )
         self.assertEqual([q.id for q in self.repos.questions.by_edge("e::related::f")], [q2.id])
+
+    def test_edge_round_trip_preserves_provenance_and_confidence(self) -> None:
+        a, b = self._concept("a"), self._concept("b")
+        self.repos.concepts.upsert(a)
+        self.repos.concepts.upsert(b)
+        e = Edge(
+            src=a.id,
+            dst=b.id,
+            type=EdgeType.PREREQUISITE,
+            provenance="spine",
+            # float4-exact value (like the 0.5/0.25 in test_edge_round_trip):
+            # the confidence column is real (4 bytes), so a non-representable
+            # value would make exact equality depend on psycopg's result format.
+            confidence=0.75,
+        )
+        self.repos.edges.upsert(e)
+        self.conn.commit()
+        got = self.repos.edges.get(a.id, b.id, EdgeType.PREREQUISITE)
+        self.assertEqual(got.provenance, "spine")
+        self.assertEqual(got.confidence, 0.75)
+        self.assertEqual(got, e)
+
+    def test_edge_provenance_defaults_round_trip(self) -> None:
+        a, b = self._concept("a"), self._concept("b")
+        self.repos.concepts.upsert(a)
+        self.repos.concepts.upsert(b)
+        e = Edge(src=a.id, dst=b.id, type=EdgeType.RELATED)
+        self.repos.edges.upsert(e)
+        self.conn.commit()
+        got = self.repos.edges.get(a.id, b.id, EdgeType.RELATED)
+        # Entity defaults must survive a round trip (parity with the schema).
+        # 0.6 is not float4-exact, so compare with a float4-sized tolerance.
+        self.assertEqual(got.provenance, "inferred")
+        self.assertAlmostEqual(got.confidence, 0.6, places=6)
+
+    def test_retire_excludes_from_listings_but_not_get(self) -> None:
+        a = self._concept("a")
+        self.repos.concepts.upsert(a)
+        q1 = Question(id=f"{self.course}:q1", concept_id=a.id, edge_id="e::related::f")
+        q2 = Question(id=f"{self.course}:q2", concept_id=a.id, edge_id="e::related::f")
+        self.repos.questions.upsert(q1)
+        self.repos.questions.upsert(q2)
+        self.repos.questions.retire(q1.id)
+        self.conn.commit()
+        # Retired: dropped from by_concept/by_edge, but still auditable via get.
+        self.assertEqual([q.id for q in self.repos.questions.by_concept(a.id)], [q2.id])
+        self.assertEqual(
+            [q.id for q in self.repos.questions.by_edge("e::related::f")], [q2.id]
+        )
+        got = self.repos.questions.get(q1.id)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.status, "retired")
+
+    def test_retire_is_idempotent_and_missing_is_noop(self) -> None:
+        a = self._concept("a")
+        self.repos.concepts.upsert(a)
+        q = Question(id=f"{self.course}:q1", concept_id=a.id)
+        self.repos.questions.upsert(q)
+        self.repos.questions.retire(q.id)
+        self.repos.questions.retire(q.id)                  # idempotent
+        self.repos.questions.retire(f"{self.course}:ghost")  # missing -> no-op
+        self.conn.commit()
+        self.assertEqual(self.repos.questions.get(q.id).status, "retired")
+
+    def test_telemetry_append_last_and_list(self) -> None:
+        t0 = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        oldest = EngagementEvent(kind="check", course=self.course, at=t0)
+        newest = EngagementEvent(
+            kind="check",
+            course=self.course,
+            at=t0 + timedelta(hours=2),
+            payload={"question_id": "q1"},
+        )
+        escalate = EngagementEvent(
+            kind="escalate", course=self.course, at=t0 + timedelta(hours=1)
+        )
+        # Append out of order: last() must order by `at`, not insertion.
+        self.repos.telemetry.append(newest)
+        self.repos.telemetry.append(oldest)
+        self.repos.telemetry.append(escalate)
+        self.conn.commit()
+        last_check = self.repos.telemetry.last("check", self.course)
+        self.assertEqual(last_check.at, newest.at)
+        self.assertEqual(dict(last_check.payload), {"question_id": "q1"})
+        self.assertIsNone(self.repos.telemetry.last("session_end", self.course))
+        listed = self.repos.telemetry.list_by_course(self.course)
+        self.assertEqual({e.at for e in listed}, {e.at for e in (oldest, newest, escalate)})
+        # engagement_log has no FK to concept; clean it explicitly.
+        self.conn.execute("DELETE FROM engagement_log WHERE course = %s", (self.course,))
+        self.conn.commit()
 
     def test_review_log_append_preserves_order(self) -> None:
         a = self._concept("a")

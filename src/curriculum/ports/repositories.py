@@ -23,6 +23,7 @@ from ..domain.entities import (
     ReviewEvent,
 )
 from ..domain.enums import EdgeType
+from ..domain.telemetry import EngagementEvent
 
 
 class ConceptIndexRepository(ABC):
@@ -98,10 +99,20 @@ class QuestionRepository(ABC):
     @abstractmethod
     def by_concept(
         self, concept_id: str, *, difficulty: int | None = None, hop_count: int | None = None
-    ) -> Sequence[Question]: ...
+    ) -> Sequence[Question]:
+        """Questions for a concept. MUST exclude questions with
+        `status == "retired"` (the kill switch): a retired question is never
+        served again."""
 
     @abstractmethod
-    def by_edge(self, edge_id: str) -> Sequence[Question]: ...
+    def by_edge(self, edge_id: str) -> Sequence[Question]:
+        """Questions for an edge. MUST exclude questions with
+        `status == "retired"` (the kill switch)."""
+
+    @abstractmethod
+    def retire(self, question_id: str) -> None:
+        """Mark a question retired so it is never served again. Idempotent;
+        a no-op if the question is unknown or already retired."""
 
 
 class LearnerStateRepository(ABC):
@@ -124,6 +135,21 @@ class ReviewLogRepository(ABC):
 
     @abstractmethod
     def by_concept(self, concept_id: str) -> Sequence[ReviewEvent]: ...
+
+
+class TelemetryRepository(ABC):
+    """Append-only engagement log (Postgres is authoritative). Feeds the
+    motivation layer: session boundaries, checks, escalations, item flags."""
+
+    @abstractmethod
+    def append(self, event: EngagementEvent) -> None: ...
+
+    @abstractmethod
+    def last(self, kind: str, course: str) -> EngagementEvent | None:
+        """The most recent event of `kind` for `course`, or None if none."""
+
+    @abstractmethod
+    def list_by_course(self, course: str) -> Sequence[EngagementEvent]: ...
 
 
 class CourseProfileRepository(ABC):

@@ -60,6 +60,8 @@ class Edge:
     exposure_count: int = 0                   # times this link was relevant in context
     skip_count: int = 0                       # times the learner was near it and didn't traverse it
     last_traversed: datetime | None = None
+    provenance: str = "inferred"              # spine | inferred | manual
+    confidence: float = 0.6                   # trust in this link, 0..1
 
     @property
     def id(self) -> str:
@@ -79,6 +81,7 @@ class Question:
     edge_id: str | None = None                # set for connection / multi-hop questions
     source_refs: tuple[SourceRef, ...] = ()
     generated_by: str | None = None
+    status: str = "active"                    # active | retired (kill switch)
 
 
 # --------------------------------------------------------------------------- #

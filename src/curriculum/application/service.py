@@ -41,6 +41,8 @@ from ..domain.errors import (
     QuestionNotFound,
 )
 from ..domain.events import GradeRecorded
+from ..domain.telemetry import EngagementEvent
+from ..engine import snapshot
 from ..ports.repositories import (
     ConceptIndexRepository,
     ContentRepository,
@@ -49,6 +51,7 @@ from ..ports.repositories import (
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
+    TelemetryRepository,
 )
 from ..ports.service import CurriculumService
 from ..ports.strategies import CreditPropagationStrategy, SchedulingStrategy, SelectionPolicy
@@ -78,6 +81,7 @@ class CurriculumApplicationService(CurriculumService):
         selection: SelectionPolicy,
         propagation: CreditPropagationStrategy,
         resolve_config: Callable[[CourseProfile], EngineConfig],
+        telemetry: TelemetryRepository | None = None,
         clock: Clock | None = None,
         skip_threshold: int = 3,
         hard_due_retrievability: float = 0.6,
@@ -93,6 +97,7 @@ class CurriculumApplicationService(CurriculumService):
         self._selection = selection
         self._propagation = propagation
         self._resolve_config = resolve_config
+        self._telemetry = telemetry
         self._clock = clock or SystemClock()
         self._skip_threshold = skip_threshold
         self._hard_due_r = hard_due_retrievability
@@ -109,6 +114,19 @@ class CurriculumApplicationService(CurriculumService):
         if profile.exam_date is None:
             return None
         return (profile.exam_date - now.date()).days
+
+    def _log(self, kind: str, course: str, at: datetime, payload: Mapping[str, Any]) -> None:
+        """Append one engagement event. Telemetry is an optional layer (like
+        FIRe): when no repository is wired the signal is simply not recorded.
+        A wired repository's errors propagate -- the codebase never swallows."""
+        if self._telemetry is None:
+            return
+        self._telemetry.append(EngagementEvent(kind=kind, course=course, at=at, payload=payload))
+
+    @staticmethod
+    def _never_seen(state: LearnerState | None) -> bool:
+        """No retention signal yet -- same rule as snapshot.unlock_proximity."""
+        return state is None or state.stability is None
 
     def _prereqs_satisfied(self, concept_id: str) -> bool:
         """A concept is learnable when every prerequisite is mastered (SOLID+)."""
@@ -289,10 +307,15 @@ class CurriculumApplicationService(CurriculumService):
         #    it back on. Mastery progression is the service's job, not the
         #    scheduler's (which keeps the incoming mastery untouched).
         prior = self._states.get(concept_id)
+        prior_stability = prior.stability if prior is not None and prior.stability is not None else 0.0
         recent = [e.grade for e in self._reviews.by_concept(concept_id) if e.grade is not None] + [score]
         new_state = self._scheduler.review(prior, rating, now, target_retention=config.target_retention)
         new_state = replace(new_state, concept_id=concept_id, mastery=next_mastery(score, recent))
         self._states.upsert(new_state)
+        # Ripple: importance-weighted stability change, accumulated across the
+        # primary concept and (below) every FIRe-credited concept, using the
+        # same weighting convention as snapshot.stability_days.
+        stability_gained = concept.importance * ((new_state.stability or 0.0) - prior_stability)
         self._reviews.append(
             ReviewEvent(
                 concept_id=concept_id, grade=score, fsrs_rating=rating, at=now,
@@ -321,11 +344,15 @@ class CurriculumApplicationService(CurriculumService):
             )
             for cid, irating in self._propagation.propagate(event):
                 st = self._states.get(cid)
+                st_stability = st.stability if st is not None and st.stability is not None else 0.0
                 updated = self._scheduler.review(
                     st, irating, now, target_retention=config.target_retention
                 )
                 self._states.upsert(replace(updated, concept_id=cid))
                 fire_credits.append({"concept_id": cid, "rating": int(irating)})
+                credited = self._concepts.get(cid)
+                if credited is not None:  # no concept -> no honest weight (as in snapshot)
+                    stability_gained += credited.importance * ((updated.stability or 0.0) - st_stability)
 
         return {
             "concept_id": concept_id,
@@ -335,16 +362,27 @@ class CurriculumApplicationService(CurriculumService):
             "stability": new_state.stability,
             "fire_credits": fire_credits,
             "escalated_connections": escalated,
+            "ripple": {
+                "count": len(fire_credits),
+                "stability_days_gained": stability_gained,
+            },
         }
+
+    @staticmethod
+    def _mastery_counts(
+        concepts: Sequence[Concept], states: Mapping[str, LearnerState]
+    ) -> dict[str, int]:
+        counts = {m.value: 0 for m in Mastery}
+        for c in concepts:
+            st = states.get(c.id)
+            counts[(st.mastery if st else Mastery.NEW).value] += 1
+        return counts
 
     def state(self, course: str) -> Mapping[str, Any]:
         now = self._clock.now()
         concepts = self._concepts.list_by_course(course)
         states = {s.concept_id: s for s in self._states.all_for_course(course)}
-        counts = {m.value: 0 for m in Mastery}
-        for c in concepts:
-            st = states.get(c.id)
-            counts[(st.mastery if st else Mastery.NEW).value] += 1
+        counts = self._mastery_counts(concepts, states)
         due_now = sum(1 for s in self._states.due(course, now))
         topics: dict[str, int] = {}
         for c in concepts:
@@ -357,3 +395,133 @@ class CurriculumApplicationService(CurriculumService):
             "due_now": due_now,
             "topics": dict(sorted(topics.items())),
         }
+
+    def checkin(self, course: str) -> Mapping[str, Any]:
+        """The honest game-state reading: every number is minted by the
+        snapshot module from current state; the only history consulted is the
+        last "check" event, whose recorded total anchors the delta."""
+        now = self._clock.now()
+        concepts = list(self._concepts.list_by_course(course))
+        concept_map = {c.id: c for c in concepts}
+        states_list = list(self._states.all_for_course(course))
+        states_map = {s.concept_id: s for s in states_list}
+
+        stability = snapshot.stability_days(states_list, concept_map)
+        last_check = self._telemetry.last("check", course) if self._telemetry else None
+        delta: float | None = None
+        if last_check is not None and "stability_days" in last_check.payload:
+            delta = stability - float(last_check.payload["stability_days"])
+
+        consolidation = snapshot.consolidation_report(
+            states_list, last_check.at if last_check else None, now
+        )
+        ripe = snapshot.ripeness(states_list, now)
+        prereq_in = {
+            c.id: self._edges.in_edges(c.id, EdgeType.PREREQUISITE) for c in concepts
+        }
+        near_unlocks = snapshot.unlock_proximity(concepts, states_map, prereq_in)
+        unlocks_ready = sorted(
+            c.id
+            for c in concepts
+            if self._never_seen(states_map.get(c.id)) and self._prereqs_satisfied(c.id)
+        )
+
+        self._log(
+            "check",
+            course,
+            now,
+            {
+                "stability_days": stability,
+                "holding": consolidation["holding"],
+                "reviewed_since": consolidation["reviewed_since"],
+            },
+        )
+        return {
+            "course": course,
+            "stability_days": stability,
+            "delta_since_last_check": delta,
+            "consolidation": consolidation,
+            "ripeness": dict(ripe),
+            "unlocks_ready": unlocks_ready,
+            "near_unlocks": near_unlocks,
+            "by_mastery": self._mastery_counts(concepts, states_map),
+        }
+
+    def frontier(self, course: str, *, focus: str | None = None) -> Mapping[str, Any]:
+        """Up to three strategy buckets over the same candidate pool next_action
+        sees. A pure read: no candidate is consumed, no question is attached,
+        the interleaving memory is untouched and no RNG is drawn (the sampling
+        lottery belongs to next_action) -- plus one "escalate" event."""
+        profile, _config = self._engine(course)
+        now = self._clock.now()
+        candidates = self._build_candidates(course, profile, now, focus=focus)
+        buckets: dict[str, dict[str, Any]] = {}
+
+        teach = [c for c in candidates if c.mode is NextMode.TEACH]
+        if teach:
+            best = min(teach, key=lambda c: (-c.concept.importance, c.concept.id))
+            buckets["push"] = {
+                "concept_id": best.concept.id,
+                "mode": NextMode.TEACH.value,
+                "reason": (
+                    "learnable now: all prerequisites satisfied "
+                    f"(importance {best.concept.importance:.2f})"
+                ),
+                "score": float(best.concept.importance),
+            }
+
+        reviews = [c for c in candidates if c.mode is NextMode.REVIEW]
+        if reviews:
+            def recall(c: CandidateContext) -> float:
+                return c.retrievability if c.retrievability is not None else 0.0
+
+            best = min(reviews, key=lambda c: (recall(c), c.concept.id))
+            buckets["reinforce"] = {
+                "concept_id": best.concept.id,
+                "mode": NextMode.REVIEW.value,
+                "reason": f"review ready: retrievability {recall(best):.2f}",
+                "score": float(1.0 - recall(best)),
+            }
+
+        terms = self._focus_terms(focus)
+        scoped = [c for c in self._concepts.list_by_course(course) if self._in_focus(c, terms)]
+        states_map = {s.concept_id: s for s in self._states.all_for_course(course)}
+        prereq_in = {
+            c.id: self._edges.in_edges(c.id, EdgeType.PREREQUISITE) for c in scoped
+        }
+        near = snapshot.unlock_proximity(scoped, states_map, prereq_in)
+        if near:
+            row = min(near, key=lambda r: (not r["one_away"], r["missing"], r["concept_id"]))
+            buckets["breakthrough"] = {
+                "concept_id": row["concept_id"],
+                "mode": NextMode.TEACH.value,
+                "reason": f"{row['missing']} prerequisite(s) left to unlock",
+                "score": float(1.0 / row["missing"]),
+            }
+
+        self._log(
+            "escalate",
+            course,
+            now,
+            {
+                "focus": focus,
+                "buckets": {name: entry["concept_id"] for name, entry in buckets.items()},
+            },
+        )
+        return buckets
+
+    def flag_question(self, question_id: str, *, reason: str = "") -> Mapping[str, Any]:
+        """The kill switch: retire the question so it is never served again."""
+        question = self._questions.get(question_id)
+        if question is None:
+            raise QuestionNotFound(f"no question with id {question_id!r}")
+        self._questions.retire(question_id)
+        concept = self._concepts.get(question.concept_id)
+        course = concept.course if concept is not None else ""
+        self._log(
+            "item_flag",
+            course,
+            self._clock.now(),
+            {"question_id": question_id, "concept_id": question.concept_id, "reason": reason},
+        )
+        return {"question_id": question_id, "status": "retired"}

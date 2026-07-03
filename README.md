@@ -34,7 +34,7 @@ ports/         abstract interfaces: repositories, strategies, providers, service
 engine/        FSRS scheduler, FIRe propagation, scoring terms, selection policy
 storage/       InMemory + Postgres repositories, OKF content repository
 okf/           OKF v0.1 (de)serialization
-ingestion/     multipass pipeline: extract -> dedupe -> infer-edges -> verify
+ingestion/     multipass pipeline: extract -> dedupe -> spine -> infer-edges -> verify
 linking/       embedding-guided edge repair for isolated concepts
 archetypes/    course strategy templates (conceptual-written, procedural, ...)
 sync/          OKF <-> Postgres reconciliation (hash-keyed, one-way)
@@ -67,8 +67,12 @@ machine that has none of them installed.
   fit, exploration, interleave penalty, coverage) that picks the single best next action and
   exposes the full ranked field.
 
-These feed the five MCP tools -- `next`, `explain`, `quiz`, `grade`, `state` -- which are
-thin adapters over the same `CurriculumService` use-cases the unit tests drive directly.
+These feed the eight MCP tools -- `next`, `explain`, `quiz`, `grade`, `state`, plus the
+motivation-layer `checkin`, `frontier`, and `flag_question` -- which are thin adapters over
+the same `CurriculumService` use-cases the unit tests drive directly. The engine mints every
+number deterministically; the tutor LLM only narrates them (see
+[`docs/narration-contract.md`](docs/narration-contract.md)). `curriculum check` renders the
+same check-in payload in the terminal with no LLM involved.
 
 ## Design docs
 
