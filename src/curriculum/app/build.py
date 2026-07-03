@@ -95,6 +95,15 @@ def load_manifest(path: str) -> dict:
     The returned dict is normalised -- ``sources`` carries exactly ``path`` and
     ``token`` per entry -- so downstream code can trust the shape without
     re-checking it.
+
+    Path resolution (single source of truth): each source ``path`` is resolved to
+    an ABSOLUTE path against the MANIFEST FILE's own directory, never the process
+    CWD. This is what makes the build and the validator agree regardless of where
+    the process runs -- a relative ``materials/x.txt`` always names the same file,
+    and every downstream consumer (:func:`_ingest_source`, ``corpus_tools.validate``)
+    reads the already-resolved absolute path rather than re-resolving it. An
+    absolute path in the manifest is preserved unchanged (``base / absolute ==
+    absolute``).
     """
     try:
         with open(path, encoding="utf-8") as handle:
@@ -117,6 +126,10 @@ def load_manifest(path: str) -> dict:
             "manifest 'sources' must be a non-empty list of {path, token} objects"
         )
 
+    # Resolve source paths against the MANIFEST's directory (not the CWD) so the
+    # normalised paths are stable no matter where the build/validator runs.
+    base = Path(path).resolve().parent
+
     normalised_sources: list[dict[str, Any]] = []
     for index, source in enumerate(sources):
         if not isinstance(source, dict):
@@ -135,8 +148,10 @@ def load_manifest(path: str) -> dict:
         # human-facing comment) so the normalised shape is exact. A truthy
         # ``spine`` flag is preserved (and only then), marking this source's
         # human-vetted ordering as the trusted prerequisite backbone; ordinary
-        # sources keep the bare {path, token} shape.
-        normalised: dict[str, Any] = {"path": source_path, "token": token}
+        # sources keep the bare {path, token} shape. ``path`` is the absolute path
+        # resolved against the manifest dir (base / absolute == absolute).
+        resolved_path = str(base / source_path)
+        normalised: dict[str, Any] = {"path": resolved_path, "token": token}
         if bool(source.get("spine", False)):
             normalised["spine"] = True
         normalised_sources.append(normalised)
@@ -283,6 +298,7 @@ def _ingest_source(
         api_key=settings.api_key,
         base_url=settings.base_url,
         model=settings.ingest_model,
+        max_tokens=settings.max_tokens,
     )
     embedder = OpenAICompatibleEmbedder(
         api_key=settings.api_key,
@@ -450,6 +466,7 @@ def link(
                     api_key=settings.api_key,
                     base_url=settings.base_url,
                     model=settings.ingest_model,
+                    max_tokens=settings.max_tokens,
                 ),
             )
             result = dict(linker.link_isolated(course))
@@ -606,6 +623,7 @@ def _gen_concept_batch(
         api_key=settings.api_key,
         base_url=settings.base_url,
         model=settings.ingest_model,
+        max_tokens=settings.max_tokens,
     )
     raw = llm.complete(prompt, system=_QGEN_SYSTEM, temperature=0.0)
 
@@ -660,6 +678,7 @@ def _gen_edge_batch(
         api_key=settings.api_key,
         base_url=settings.base_url,
         model=settings.ingest_model,
+        max_tokens=settings.max_tokens,
     )
     raw = llm.complete(prompt, system=_QGEN_SYSTEM, temperature=0.0)
 

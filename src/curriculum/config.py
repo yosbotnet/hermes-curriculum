@@ -23,6 +23,11 @@ class Settings:
     ingest_model: str = "deepseek/deepseek-v4-flash"
     embed_model: str = "google/gemini-embedding-2"  # multimodal, native 3072-dim
     embedding_dim: int = 3072
+    # Completion budget per LLM call. Reasoning models spend this SAME budget on
+    # hidden thinking before any visible content, so a value that is ample for a
+    # plain model can starve a reasoning one into empty completions -- raise this
+    # (e.g. 32768) when ingesting with a reasoning model.
+    max_tokens: int = 8192
     # Where per-invocation build logs land (see curriculum.app.build_logging).
     # Relative to the working directory by default so an operator finds them next
     # to where they launched the build.
@@ -45,5 +50,6 @@ def load(env: dict[str, str] | None = None) -> Settings:
         ingest_model=e.get("CURRICULUM_INGEST_MODEL", d.ingest_model),
         embed_model=e.get("CURRICULUM_EMBED_MODEL", d.embed_model),
         embedding_dim=int(e.get("CURRICULUM_EMBED_DIM", str(d.embedding_dim))),
+        max_tokens=int(e.get("CURRICULUM_MAX_TOKENS", str(d.max_tokens))),
         log_dir=e.get("CURRICULUM_LOG_DIR", d.log_dir),
     )

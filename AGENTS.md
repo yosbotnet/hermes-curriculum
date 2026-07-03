@@ -74,6 +74,7 @@ bundle). It exits non-zero if anything is missing, so it doubles as a scriptable
    | `CURRICULUM_INGEST_MODEL` | `deepseek/deepseek-v4-flash`                                   | LLM for extraction, edge inference, linking, and question generation. |
    | `CURRICULUM_EMBED_MODEL`  | `google/gemini-embedding-2`                                    | Embedding model (3072-dim by default). |
    | `CURRICULUM_EMBED_DIM`    | `3072`                                                         | Embedding dimension. MUST match the `vector(N)` column in `schema/001_init.sql`. |
+   | `CURRICULUM_MAX_TOKENS`   | `8192`                                                         | Completion budget per LLM call. Reasoning models spend this same budget on hidden thinking BEFORE any visible output; if the build log shows "EMPTY completion" warnings, raise this (e.g. 32768) or use a non-reasoning ingest model. |
 
 4. **Create your manifest and point it at your own materials.**
    ```sh

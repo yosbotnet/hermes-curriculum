@@ -60,11 +60,17 @@ class OpenAICompatibleLlm(LlmProvider):
         base_url: str = "https://inference-api.nousresearch.com/v1",
         model: str = "deepseek/deepseek-v4-flash",
         timeout: float = 120.0,
+        max_tokens: int = 8192,
     ) -> None:
         self._key = api_key
         self._url = base_url.rstrip("/") + "/chat/completions"
         self._model = model
         self._timeout = timeout
+        # Instance-level completion budget (CURRICULUM_MAX_TOKENS upstream).
+        # Reasoning models spend this budget on hidden thinking BEFORE any
+        # visible content, so a budget that is generous for a plain model can
+        # yield an EMPTY completion from a reasoning one.
+        self._max_tokens = max_tokens
         self.calls = 0
         self.failures = 0
 
@@ -73,9 +79,11 @@ class OpenAICompatibleLlm(LlmProvider):
         prompt: str,
         *,
         system: str | None = None,
-        max_tokens: int = 8192,
+        max_tokens: int | None = None,
         temperature: float = 0.2,
     ) -> str:
+        if max_tokens is None:
+            max_tokens = self._max_tokens
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -111,13 +119,40 @@ class OpenAICompatibleLlm(LlmProvider):
             _report_failure(f"[OpenAICompatibleLlm] request failed: {exc}")
             return ""
         try:
-            return payload["choices"][0]["message"].get("content") or ""
+            choice = payload["choices"][0]
+            message = choice["message"]
+            content = message.get("content") or ""
         except (KeyError, IndexError, TypeError):  # pragma: no cover
             self.failures += 1
             _report_failure(
                 f"[OpenAICompatibleLlm] unexpected response shape: {str(payload)[:200]}"
             )
             return ""
+        if content.strip():
+            return content
+        # HTTP 200 with NO visible content: the silent killer with reasoning
+        # models. Their chain-of-thought counts against max_tokens and lands in
+        # reasoning_content/reasoning, so an exhausted budget returns an empty
+        # content field with finish_reason "length" -- which the lenient parsing
+        # downstream would swallow as "no items" and record the source as
+        # healthy. Diagnose it loudly instead.
+        self.failures += 1
+        finish = choice.get("finish_reason")
+        reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+        if finish == "length" or reasoning:
+            _report_failure(
+                "[OpenAICompatibleLlm] EMPTY completion: the model spent the "
+                f"token budget (max_tokens={max_tokens}, finish_reason={finish!r}"
+                f"{', reasoning tokens present' if reasoning else ''}) before "
+                "emitting any content. Reasoning models think against the same "
+                "budget - raise CURRICULUM_MAX_TOKENS or switch to a "
+                "non-reasoning model for ingestion."
+            )
+        else:
+            _report_failure(
+                f"[OpenAICompatibleLlm] empty completion (finish_reason={finish!r})"
+            )
+        return ""
 
 
 class OpenAICompatibleEmbedder(EmbeddingProvider):

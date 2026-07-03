@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from curriculum.app import corpus_tools
+from curriculum.app import build, corpus_tools
 
 
 class ScaffoldTest(unittest.TestCase):
@@ -215,6 +215,22 @@ class ValidateWarningTest(unittest.TestCase):
             spine_warnings = [w for w in report["warnings"] if "spine" in w.lower()]
             self.assertFalse(spine_warnings)
 
+    def test_short_spine_source_does_not_trigger_no_spine_warning(self) -> None:
+        # A spine source whose ONLY defect is the short-file warning still gives
+        # the build a usable ordering (it will be chained), so it must NOT trip
+        # the spurious "no spine source" warning.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tiny.txt").write_text("too short", encoding="utf-8")
+            manifest = _write_manifest(
+                root, [{"path": "tiny.txt", "token": "t", "spine": True}]
+            )
+            report = corpus_tools.validate(str(manifest))
+            spine_warnings = [
+                w for w in report["warnings"] if "no spine source" in w.lower()
+            ]
+            self.assertFalse(spine_warnings, "short spine must not warn no-spine")
+
     def test_spine_source_with_error_does_not_count_as_spine(self) -> None:
         # A spine source that is itself in error must NOT suppress the no-spine
         # warning: there is no usable trusted ordering.
@@ -261,6 +277,65 @@ class ValidateCleanAndEstimateTest(unittest.TestCase):
                 self.assertEqual(source["lines"], 300)
                 self.assertEqual(source["chunks"], 2)
                 self.assertEqual(source["status"], "ok")
+
+
+    def test_warning_status_source_chunks_are_counted_in_estimate(self) -> None:
+        # A short-but-valid (warning) source shows chunks in its row; those chunks
+        # WILL be ingested, so they must be added to the estimate totals -- not
+        # gated out because the status is "warning" rather than "ok".
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "tiny.txt").write_text("too short", encoding="utf-8")
+            manifest = _write_manifest(
+                root, [{"path": "tiny.txt", "token": "t", "spine": True}]
+            )
+            report = corpus_tools.validate(str(manifest))
+            row = report["sources"][0]
+            self.assertEqual(row["status"], "warning")
+            self.assertGreater(row["chunks"], 0)
+            # The warning source's chunks must be reflected in the estimate.
+            self.assertEqual(report["estimate"]["chunks"], row["chunks"])
+            self.assertEqual(report["estimate"]["extract_calls"], row["chunks"])
+
+
+class ValidateResolutionParityTest(unittest.TestCase):
+    """validate resolves source paths the same way the build reads them.
+
+    The single source of truth is :func:`build.load_manifest`, which normalises
+    each source path to an absolute path against the MANIFEST's directory. validate
+    must trust that resolution (not re-resolve against CWD), so its report is
+    parity-by-construction with what the build will actually ingest.
+    """
+
+    def test_validate_trusts_load_manifest_resolved_paths(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "materials").mkdir()
+            body = "\n".join(f"line {i} teaching text" for i in range(300))
+            (root / "materials" / "a.txt").write_text(body, encoding="utf-8")
+            manifest = _write_manifest(
+                root, [{"path": "materials/a.txt", "token": "a", "spine": True}]
+            )
+            # The file load_manifest resolves is exactly the one that exists.
+            loaded = build.load_manifest(str(manifest))
+            resolved = Path(loaded["sources"][0]["path"])
+            self.assertTrue(resolved.is_absolute())
+            self.assertTrue(resolved.is_file())
+            # And validate agrees: no errors (parity by construction).
+            report = corpus_tools.validate(str(manifest))
+            self.assertEqual(report["errors"], [])
+
+    def test_absolute_source_path_still_validates(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            body = "\n".join(f"line {i} teaching text" for i in range(300))
+            target = root / "elsewhere.txt"
+            target.write_text(body, encoding="utf-8")
+            manifest = _write_manifest(
+                root, [{"path": str(target), "token": "a", "spine": True}]
+            )
+            report = corpus_tools.validate(str(manifest))
+            self.assertEqual(report["errors"], [])
 
 
 if __name__ == "__main__":

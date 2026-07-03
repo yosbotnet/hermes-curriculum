@@ -152,11 +152,12 @@ def validate(manifest_path: str) -> dict:
     * empty (zero decoded characters) -> error;
     * under ~200 characters -> warning (suspiciously short, likely a stub).
 
-    A source that clears every check is ``status == "ok"`` and contributes its
-    line/chunk counts to the estimate. Spine consideration: if NO ``spine`` source
-    validates cleanly, a warning notes that every prerequisite edge will be
-    inferred and suggests marking a trusted ordering (a spine source that is itself
-    in error does not count, since it yields no usable order).
+    Every source that is not a hard ``error`` (an ``"ok"`` source and a short-but-
+    valid ``"warning"`` source alike) will be ingested, so it contributes its
+    line/chunk counts to the estimate. Spine consideration: a ``spine`` source
+    counts as a usable ordering unless it is itself in ``error``; only when NO such
+    spine remains does a warning note that every prerequisite edge will be inferred
+    and suggest marking a trusted ordering.
 
     ``estimate`` totals the extract-call cost so it is visible before any paid
     inference: per-source line count and chunk count at the manifest's
@@ -178,12 +179,11 @@ def validate(manifest_path: str) -> dict:
         return report
 
     chunk_lines = manifest["chunk_lines"]
-    base = Path(manifest_path).resolve().parent
     total_chunks = 0
     any_clean_spine = False
 
     for source in manifest["sources"]:
-        row = _check_source(source, base, chunk_lines)
+        row = _check_source(source, chunk_lines)
         report["sources"].append(row)
         # Attribute the source's error/warning to the top-level lists, tagged with
         # its token so the agent knows which file to fix.
@@ -191,7 +191,12 @@ def validate(manifest_path: str) -> dict:
             report["errors"].append(f"[{source['token']}] {row['error']}")
         if row["warning"]:
             report["warnings"].append(f"[{source['token']}] {row['warning']}")
-        if row["status"] == "ok":
+        # Anything that is not a hard error WILL be ingested (an "ok" source and a
+        # short-but-valid "warning" source alike), so its chunks count toward the
+        # cost estimate and, when it is a spine, it supplies a usable ordering.
+        # Gating these on status == "ok" undercounts cost and spuriously warns
+        # "no spine" for a spine whose only defect is the short-file warning.
+        if row["status"] != "error":
             total_chunks += row["chunks"]
             if source.get("spine"):
                 any_clean_spine = True
@@ -211,21 +216,20 @@ def validate(manifest_path: str) -> dict:
     return report
 
 
-def _check_source(source: dict, base: Path, chunk_lines: int) -> dict:
+def _check_source(source: dict, chunk_lines: int) -> dict:
     """Classify one source file, returning its per-source report row.
 
     The row is ``{token, path, status, error, warning, lines, chunks}``: ``status``
     is ``"ok"``, ``"error"``, or ``"warning"``; ``error``/``warning`` hold the
     single most pointed message (or ``""``); ``lines``/``chunks`` are populated
-    only once the file decodes (0 otherwise). ``path`` is resolved relative to the
-    MANIFEST's directory so a relative source path validates the same way the build
-    will read it.
+    only once the file decodes (0 otherwise). ``source['path']`` is trusted as-is:
+    :func:`curriculum.app.build.load_manifest` has already resolved it to an
+    absolute path against the manifest's directory, so validate reads exactly the
+    file the build will -- there is no CWD-relative re-resolution here.
     """
     token = source["token"]
     raw_path = source["path"]
     path = Path(raw_path)
-    if not path.is_absolute():
-        path = base / path
 
     row: dict[str, Any] = {
         "token": token,

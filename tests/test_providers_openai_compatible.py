@@ -239,3 +239,90 @@ class LegacyShimImportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyCompletionDiagnosisTest(unittest.TestCase):
+    """HTTP 200 with no visible content must be diagnosed, not swallowed.
+
+    Reasoning models spend max_tokens on hidden thinking; an exhausted budget
+    returns finish_reason "length" and an EMPTY content field. Before this
+    diagnosis existed, that flowed through the lenient parsing as "no items"
+    and a fully starved build logged every source as healthy.
+    """
+
+    def _complete(self, payload: dict) -> tuple[str, OpenAICompatibleLlm, str]:
+        patcher, _ = _patch_urlopen(payload)
+        llm = OpenAICompatibleLlm(api_key="k")
+        stderr = io.StringIO()
+        with patcher, redirect_stderr(stderr), self.assertLogs(
+            "curriculum.providers", level="WARNING"
+        ) as logs:
+            out = llm.complete("prompt")
+        self.assertEqual(logs.output and len(logs.output), 1)
+        return out, llm, logs.output[0]
+
+    def test_reasoning_budget_exhaustion_is_diagnosed(self) -> None:
+        payload = {
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "", "reasoning_content": "thinking..."},
+                }
+            ]
+        }
+        out, llm, warning = self._complete(payload)
+        self.assertEqual(out, "")
+        self.assertEqual(llm.failures, 1)
+        self.assertIn("EMPTY completion", warning)
+        self.assertIn("CURRICULUM_MAX_TOKENS", warning)
+        self.assertIn("length", warning)
+
+    def test_reasoning_content_without_length_is_still_diagnosed(self) -> None:
+        payload = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": None, "reasoning": "hidden thoughts"},
+                }
+            ]
+        }
+        out, llm, warning = self._complete(payload)
+        self.assertEqual(out, "")
+        self.assertEqual(llm.failures, 1)
+        self.assertIn("reasoning tokens present", warning)
+
+    def test_plain_empty_completion_warns_generically(self) -> None:
+        payload = {
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        }
+        out, llm, warning = self._complete(payload)
+        self.assertEqual(out, "")
+        self.assertEqual(llm.failures, 1)
+        self.assertIn("empty completion", warning)
+
+    def test_whitespace_only_content_counts_as_empty(self) -> None:
+        payload = {
+            "choices": [{"finish_reason": "stop", "message": {"content": "  \n"}}]
+        }
+        out, llm, _warning = self._complete(payload)
+        self.assertEqual(out, "")
+        self.assertEqual(llm.failures, 1)
+
+    def test_constructor_max_tokens_is_sent_when_call_omits_it(self) -> None:
+        payload = {"choices": [{"message": {"content": "fine"}}]}
+        patcher, captured = _patch_urlopen(payload)
+        llm = OpenAICompatibleLlm(api_key="k", max_tokens=32768)
+        with patcher:
+            out = llm.complete("prompt")
+        self.assertEqual(out, "fine")
+        body = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(body["max_tokens"], 32768)
+
+    def test_call_site_max_tokens_still_overrides_constructor(self) -> None:
+        payload = {"choices": [{"message": {"content": "fine"}}]}
+        patcher, captured = _patch_urlopen(payload)
+        llm = OpenAICompatibleLlm(api_key="k", max_tokens=32768)
+        with patcher:
+            llm.complete("prompt", max_tokens=64)
+        body = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(body["max_tokens"], 64)

@@ -50,16 +50,55 @@ class LoadManifestHappyPathTest(unittest.TestCase):
                 },
             )
             manifest = build.load_manifest(path)
+            # CONTRACT (deliberately updated): source paths are normalised to
+            # ABSOLUTE paths resolved against the MANIFEST file's directory, so the
+            # build (which may run from a different CWD) reads exactly the file the
+            # validator checked. Absolute == manifest-dir-relative here.
+            base = Path(path).resolve().parent
 
         self.assertEqual(manifest["course"], "Cybersecurity")
         self.assertEqual(manifest["chunk_lines"], 80)
         self.assertEqual(
             manifest["sources"],
             [
-                {"path": "materials/a.txt", "token": "a"},
-                {"path": "materials/b.txt", "token": "b"},
+                {"path": str(base / "materials/a.txt"), "token": "a"},
+                {"path": str(base / "materials/b.txt"), "token": "b"},
             ],
         )
+        for source in manifest["sources"]:
+            self.assertTrue(Path(source["path"]).is_absolute())
+
+    def test_relative_source_paths_resolve_against_manifest_dir_not_cwd(self) -> None:
+        # Cross-dir parity: load_manifest must resolve a relative source path
+        # against the manifest's own directory, independent of the process CWD, so
+        # the resolved path points at the file that actually exists on disk.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "materials").mkdir()
+            (root / "materials" / "a.txt").write_text("teaching text", encoding="utf-8")
+            path = _write_manifest(
+                directory,
+                {"course": "C", "sources": [{"path": "materials/a.txt", "token": "a"}]},
+            )
+            manifest = build.load_manifest(path)
+            resolved = Path(manifest["sources"][0]["path"])
+            self.assertTrue(resolved.is_absolute())
+            self.assertTrue(
+                resolved.is_file(), "resolved path must point at the real file"
+            )
+            self.assertEqual(resolved, root / "materials" / "a.txt")
+
+    def test_absolute_source_paths_are_preserved_unchanged(self) -> None:
+        # An absolute source path must survive normalisation intact (base / abs == abs).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            absolute = str(root / "elsewhere.txt")
+            path = _write_manifest(
+                directory,
+                {"course": "C", "sources": [{"path": absolute, "token": "a"}]},
+            )
+            manifest = build.load_manifest(path)
+        self.assertEqual(manifest["sources"][0]["path"], str(Path(absolute)))
 
     def test_chunk_lines_defaults_to_150_when_absent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
