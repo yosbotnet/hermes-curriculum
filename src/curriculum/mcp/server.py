@@ -237,7 +237,7 @@ def _call_flag_question(
 # MCP wiring (the only part that touches the SDK).
 # --------------------------------------------------------------------------- #
 def build_server(service: CurriculumService) -> Any:
-    """Build a FastMCP server exposing ``service`` as the five curriculum tools.
+    """Build a FastMCP server exposing ``service`` as the eight curriculum tools.
 
     Each registered handler is a thin closure over ``service`` that defers to a
     pure ``_call_*`` router (above). The return annotations are deliberately

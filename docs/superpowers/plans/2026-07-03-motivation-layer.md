@@ -246,3 +246,14 @@ def flag_question(self, question_id: str, *, reason: str = "") -> Mapping[str, A
 - Spec coverage: check-in loop (T2+T6+T7), frontier choice (T6+T8), ripple (T6), honest currency (importance weighting T2, day granularity T2, gain-framing everywhere), telemetry-first (T1+T4+T6), item kill switch (T1+T4+T6+T7), edge provenance + spine + audit path (T1+T5), GPU corpus (T3+T5). Deferred list is explicit.
 - Type consistency: EngagementEvent/TelemetryRepository names match across T1/T4/T6; snapshot signatures match T2/T6; payload key names match T6/T7/T8.
 - Placeholders: none; Task 5 Step 1 is a deliberate read-first step because IngestionContext internals must not be guessed.
+
+## Post-review decisions (final whole-branch review, 2026-07-03)
+
+- Telemetry error propagation: the "telemetry must never break a use-case" phrasing is
+  retired in favor of what the code does -- a wired telemetry repository's errors PROPAGATE.
+  Rationale: telemetry is the measurement instrument of the n=1 experiment; a silently
+  swallowed telemetry failure would corrupt the experiment while looking healthy, which is
+  strictly worse than a loud checkin failure. The in-memory default cannot fail; the
+  Postgres path fails loudly and points at a missing migration.
+- Spine chaining is per source file (each source runs its own pipeline). The corpus guide
+  now instructs one file per spine. Cross-source stitching is follow-up work.

@@ -38,12 +38,14 @@ Practically, this means the single highest-leverage decision you make when build
 corpus is which source anchors each phase as the spine. Everything else in that phase is a
 satellite that hangs concepts off the spine's backbone.
 
-Note on repository state: the `spine` boolean on a `corpus.json` source entry is being added
-to the ingestion pipeline as a sibling piece of work (see the project's implementation plan
-for the motivation layer, `docs/superpowers/plans/2026-07-03-motivation-layer.md`). If your
-checkout does not yet honor `spine`, every source is
-treated as a satellite and all prerequisite edges are inferred rather than trusted; the
-example in section (f) below assumes the flag has landed.
+Note on chaining scope: the `spine` boolean on a `corpus.json` source entry is honored by
+the ingestion pipeline (SpinePass; see `docs/superpowers/plans/2026-07-03-motivation-layer.md`),
+but chaining happens PER SOURCE FILE -- each source is ingested through its own pipeline run,
+so concepts are chained within one spine file and never across files. Practical consequence:
+put an entire spine (for example, all the PMPP chapters you transcribe) into ONE plain-text
+file, in order. Splitting a spine across several `spine: true` files produces several
+disconnected chains with no trusted edges between them, which defeats the point of a spine.
+Cross-file stitching is tracked as follow-up work; until it lands, one file per spine.
 
 ## b. Phase 1 -- CUDA foundations and the performance model
 
@@ -59,8 +61,9 @@ the core CUDA programming model (kernels, threads, blocks), the memory hierarchy
 coalescing, performance considerations (occupancy, divergence, tiling), a long run of
 parallel-pattern chapters (convolution, stencil, histogram, reduction, prefix sum/scan,
 merge, sorting, sparse matrix formats), and later chapters on graph traversal, deep-learning
-primitives, and more advanced/dynamic-parallelism topics. Transcribe or extract chapters as
-separate plain-text files in that order and mark the source `spine: true`.
+primitives, and more advanced/dynamic-parallelism topics. Transcribe or extract the chapters
+you want, in that order, into ONE plain-text file and mark that single source `spine: true`
+(spine chaining is per source file; see the note in section a).
 
 **Spine, option B (free alternative): GPU MODE lecture series plus the CUDA C++ Programming
 Guide.** GPU MODE (formerly CUDA MODE) publishes a numbered lecture series covering the same
@@ -222,10 +225,7 @@ that material is included in or committed to this repository; only the manifest 
   "course": "GPUKernelOptimization",
   "chunk_lines": 150,
   "sources": [
-    { "path": "materials/pmpp-ch01-intro.txt", "token": "pmpp-ch01", "spine": true },
-    { "path": "materials/pmpp-ch02-programming-model.txt", "token": "pmpp-ch02", "spine": true },
-    { "path": "materials/pmpp-ch03-memory-and-coalescing.txt", "token": "pmpp-ch03", "spine": true },
-    { "path": "materials/pmpp-ch04-performance-considerations.txt", "token": "pmpp-ch04", "spine": true },
+    { "path": "materials/pmpp-chapters-in-order.txt", "token": "pmpp", "spine": true },
     { "path": "materials/cuda-best-practices-guide.txt", "token": "cuda-best-practices" },
     { "path": "materials/nsight-compute-docs.txt", "token": "nsight-compute-docs" },
     { "path": "materials/simon-boehm-cuda-matmul-worklog.txt", "token": "boehm-matmul-worklog" },
@@ -244,8 +244,8 @@ that material is included in or committed to this repository; only the manifest 
 }
 ```
 
-If you use the free alternative for Phase 1 instead of PMPP, replace the four `pmpp-ch0*`
-entries with your GPU MODE lecture transcripts and/or CUDA C++ Programming Guide sections,
-in the order you extracted them, and mark whichever one you treat as the trusted ordering
-`spine: true`; leave the other as a satellite unless you are confident interleaving both into
-one single trusted sequence.
+If you use the free alternative for Phase 1 instead of PMPP, replace the `pmpp` entry with
+one concatenated file of your GPU MODE lecture transcripts or CUDA C++ Programming Guide
+sections, in the order you extracted them, and mark that single file `spine: true`; add the
+other body of material as a satellite unless you are confident interleaving both into one
+single trusted sequence in one file.

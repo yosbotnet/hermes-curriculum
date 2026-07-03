@@ -133,7 +133,12 @@ class _StubService(CurriculumService):
             "stability_days": 12.5,
             "delta_since_last_check": 2.0,
             "consolidation": {"holding": 3, "reviewed_since": 1},
-            "ripeness": {"ripe": 1, "green": 2},
+            "ripeness": {
+                "ready_now": ["c1"],
+                "ready_tomorrow": [],
+                "ready_this_week": ["c2"],
+                "holding": [],
+            },
             "unlocks_ready": ["c3"],
             "near_unlocks": [{"concept_id": "c4", "missing": 1, "one_away": True}],
             "by_mastery": {"new": 1, "learning": 1, "solid": 1, "exam_ready": 0},

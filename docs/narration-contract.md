@@ -92,3 +92,8 @@ and it must be grounded strictly in that concept's source_refs. Do not use facts
 from anywhere else and do not invent detail.
 
 Never use emojis.
+
+---
+
+End of the system-prompt block. Anything added to this file below the closing
+rule above is contract commentary, not part of the paste.
