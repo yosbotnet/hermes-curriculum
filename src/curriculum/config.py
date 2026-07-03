@@ -27,7 +27,7 @@ class Settings:
     # hidden thinking before any visible content, so a value that is ample for a
     # plain model can starve a reasoning one into empty completions -- raise this
     # (e.g. 32768) when ingesting with a reasoning model.
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     # Where per-invocation build logs land (see curriculum.app.build_logging).
     # Relative to the working directory by default so an operator finds them next
     # to where they launched the build.

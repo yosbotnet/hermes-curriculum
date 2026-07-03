@@ -60,7 +60,7 @@ class OpenAICompatibleLlm(LlmProvider):
         base_url: str = "https://inference-api.nousresearch.com/v1",
         model: str = "deepseek/deepseek-v4-flash",
         timeout: float = 120.0,
-        max_tokens: int = 8192,
+        max_tokens: int = 16384,
     ) -> None:
         self._key = api_key
         self._url = base_url.rstrip("/") + "/chat/completions"
