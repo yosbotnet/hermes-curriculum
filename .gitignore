@@ -13,6 +13,10 @@ __pycache__/
 bundle/
 *_ingest_results
 
+# Durable per-invocation build logs (CURRICULUM_LOG_DIR, default logs/): build
+# diagnostics, regenerated every run -- never committed.
+logs/
+
 # The user's own manifest (copied from corpus.example.json, points at their files).
 # The example template stays tracked; the real corpus.json does not.
 /corpus.json

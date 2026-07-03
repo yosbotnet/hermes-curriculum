@@ -23,6 +23,10 @@ class Settings:
     ingest_model: str = "deepseek/deepseek-v4-flash"
     embed_model: str = "google/gemini-embedding-2"  # multimodal, native 3072-dim
     embedding_dim: int = 3072
+    # Where per-invocation build logs land (see curriculum.app.build_logging).
+    # Relative to the working directory by default so an operator finds them next
+    # to where they launched the build.
+    log_dir: str = "logs"
 
 
 def load(env: dict[str, str] | None = None) -> Settings:
@@ -41,4 +45,5 @@ def load(env: dict[str, str] | None = None) -> Settings:
         ingest_model=e.get("CURRICULUM_INGEST_MODEL", d.ingest_model),
         embed_model=e.get("CURRICULUM_EMBED_MODEL", d.embed_model),
         embedding_dim=int(e.get("CURRICULUM_EMBED_DIM", str(d.embedding_dim))),
+        log_dir=e.get("CURRICULUM_LOG_DIR", d.log_dir),
     )

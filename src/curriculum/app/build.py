@@ -16,20 +16,21 @@ optional, environment-specific dependencies. They are imported *inside* the
 functions that need them, never at module load, so ``import curriculum.app.build``
 succeeds on a machine with no database driver and no network -- which is exactly
 what lets the manifest loader (pure JSON + validation) be unit-tested offline and
-lets the rest of the test-suite import this module freely. The OpenAI-compatible
-providers and the ingestion passes, by contrast, are stdlib-only and safe to
-import eagerly.
+lets the rest of the test-suite import this module freely. The Nous providers and
+the ingestion passes, by contrast, are stdlib-only and safe to import eagerly.
 
 Standard library plus the project's own modules only.
 """
 from __future__ import annotations
 
 import json
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+from .build_logging import NULL_LOGGER
 from ..domain.entities import Question, QuestionContent, SourceRef
 from ..domain.errors import ConfigError
 from ..ingestion.passes import (
@@ -153,7 +154,9 @@ def load_manifest(path: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Stage 1: ingest sources into the concept/edge graph (graph-only pipeline).
 # --------------------------------------------------------------------------- #
-def ingest(manifest: dict, settings: Settings) -> dict:
+def ingest(
+    manifest: dict, settings: Settings, logger: logging.Logger | None = None
+) -> dict:
     """Ingest every manifest source into the knowledge graph, concurrently.
 
     Each source is read, split into ``chunk_lines``-line chunks (each tagged with
@@ -174,13 +177,23 @@ def ingest(manifest: dict, settings: Settings) -> dict:
     detect a partial run.
 
     Returns aggregate counts ``{files, concepts, edges}``.
+
+    ``logger`` (when supplied by the CLI) receives per-stage and per-source
+    progress and, crucially, the FULL traceback of any source that fails -- so a
+    provider timeout or a bad file leaves a durable, post-mortem-able record even
+    though the batch itself keeps going.
     """
+    log = logger or NULL_LOGGER
     _require_api_key(settings)
     # The OKF content repository is stateless (just a root path) and writes one
     # file per concept id, so a single instance is safely shared across workers.
     content = FileContentRepository(Path(settings.okf_bundle_path))
     sources = manifest["sources"]
     workers = _worker_count(settings, len(sources))
+    log.info(
+        "stage=ingest starting course=%s sources=%d workers=%d",
+        manifest["course"], len(sources), workers,
+    )
 
     files = concepts = edges = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -189,14 +202,28 @@ def ingest(manifest: dict, settings: Settings) -> dict:
             for source in sources
         }
         for future in as_completed(futures):
+            source = futures[future]
+            token = source.get("token")
             try:
                 counts = future.result()
             except Exception:  # noqa: BLE001 - one bad source must not sink the batch
+                # logger.exception records the FULL provider/error traceback; the
+                # batch continues so the inference already spent on good sources
+                # is not thrown away.
+                log.exception(
+                    "stage=ingest source failed token=%s path=%s",
+                    token, source.get("path"),
+                )
                 continue
             files += 1
             concepts += counts["concepts"]
             edges += counts["edges"]
+            log.info(
+                "stage=ingest source ok token=%s concepts=%d edges=%d",
+                token, counts["concepts"], counts["edges"],
+            )
 
+    log.info("stage=ingest done files=%d concepts=%d edges=%d", files, concepts, edges)
     return {"files": files, "concepts": concepts, "edges": edges}
 
 
@@ -266,7 +293,9 @@ def _ingest_source(
 # --------------------------------------------------------------------------- #
 # Stage 2: link the isolated concepts (embedding-guided edge repair).
 # --------------------------------------------------------------------------- #
-def link(settings: Settings, course: str) -> dict:
+def link(
+    settings: Settings, course: str, logger: logging.Logger | None = None
+) -> dict:
     """Connect isolated concepts to the graph via embedding-guided edge repair.
 
     Delegates to the :class:`EmbeddingLinker`, which (for each concept that has
@@ -277,35 +306,47 @@ def link(settings: Settings, course: str) -> dict:
     same Settings-driven seam as the rest of the build.
 
     Returns whatever counts the linker reports (e.g. inferred/persisted/still
-    isolated) as a plain dict.
+    isolated) as a plain dict. On failure the FULL traceback is logged before the
+    error propagates, so a provider/DB fault mid-link is preserved for a
+    post-mortem.
     """
+    log = logger or NULL_LOGGER
     _require_api_key(settings)
     # Both imports are deferred: the linker is the refactor of repair_emb.py and
     # the Postgres adapter is optional, so this module imports without either.
     from ..linking.embedding_linker import EmbeddingLinker
     from ..storage.postgres import PostgresRepositories, connect
 
-    connection = connect(settings.database_url)
+    log.info("stage=link starting course=%s", course)
     try:
-        repos = PostgresRepositories(connection)
-        linker = EmbeddingLinker(
-            repos.concepts,
-            repos.edges,
-            OpenAICompatibleLlm(
-                api_key=settings.api_key,
-                base_url=settings.base_url,
-                model=settings.ingest_model,
-            ),
-        )
-        return dict(linker.link_isolated(course))
-    finally:
-        connection.close()
+        connection = connect(settings.database_url)
+        try:
+            repos = PostgresRepositories(connection)
+            linker = EmbeddingLinker(
+                repos.concepts,
+                repos.edges,
+                OpenAICompatibleLlm(
+                    api_key=settings.api_key,
+                    base_url=settings.base_url,
+                    model=settings.ingest_model,
+                ),
+            )
+            result = dict(linker.link_isolated(course))
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - record the fault durably, then re-raise
+        log.exception("stage=link failed course=%s", course)
+        raise
+    log.info("stage=link done course=%s result=%s", course, result)
+    return result
 
 
 # --------------------------------------------------------------------------- #
 # Stage 3: batched KNIGHT question generation over the persisted graph.
 # --------------------------------------------------------------------------- #
-def generate_questions(settings: Settings, course: str) -> dict:
+def generate_questions(
+    settings: Settings, course: str, logger: logging.Logger | None = None
+) -> dict:
     """Generate exam questions over the persisted graph, in batches, threaded.
 
     Standalone from the per-item ``QuestionGenPass`` on purpose: it reads the
@@ -319,38 +360,50 @@ def generate_questions(settings: Settings, course: str) -> dict:
     write is idempotent and a re-run overwrites rather than duplicates.
 
     Returns ``{questions: int}`` -- the number of questions generated/persisted.
+    On failure the FULL traceback is logged before the error propagates.
     """
+    log = logger or NULL_LOGGER
     _require_api_key(settings)
     from ..storage.postgres import PostgresRepositories, connect
 
+    log.info("stage=questions starting course=%s", course)
     content = FileContentRepository(Path(settings.okf_bundle_path))
-    connection = connect(settings.database_url)
     try:
-        repos = PostgresRepositories(connection)
-        concept_batches, refs_by_id = _concept_batches(connection, content, course)
-        edge_batches = _edge_batches(connection, course)
-        workers = _worker_count(settings, len(concept_batches) + len(edge_batches))
+        connection = connect(settings.database_url)
+        try:
+            repos = PostgresRepositories(connection)
+            concept_batches, refs_by_id = _concept_batches(connection, content, course)
+            edge_batches = _edge_batches(connection, course)
+            workers = _worker_count(settings, len(concept_batches) + len(edge_batches))
+            log.info(
+                "stage=questions batches concepts=%d edges=%d workers=%d",
+                len(concept_batches), len(edge_batches), workers,
+            )
 
-        generated: list[tuple[Question, QuestionContent]] = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(_gen_concept_batch, settings, batch, refs_by_id)
-                for batch in concept_batches
-            ]
-            futures += [
-                executor.submit(_gen_edge_batch, settings, batch, refs_by_id)
-                for batch in edge_batches
-            ]
-            for future in as_completed(futures):
-                generated.extend(future.result())
+            generated: list[tuple[Question, QuestionContent]] = []
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [
+                    executor.submit(_gen_concept_batch, settings, batch, refs_by_id)
+                    for batch in concept_batches
+                ]
+                futures += [
+                    executor.submit(_gen_edge_batch, settings, batch, refs_by_id)
+                    for batch in edge_batches
+                ]
+                for future in as_completed(futures):
+                    generated.extend(future.result())
 
-        # Persist on the main connection: content first, then the index row.
-        for question, question_content in generated:
-            content.put_question_content(question_content)
-            repos.questions.upsert(question)
-    finally:
-        connection.close()
+            # Persist on the main connection: content first, then the index row.
+            for question, question_content in generated:
+                content.put_question_content(question_content)
+                repos.questions.upsert(question)
+        finally:
+            connection.close()
+    except Exception:  # noqa: BLE001 - record the fault durably, then re-raise
+        log.exception("stage=questions failed course=%s", course)
+        raise
 
+    log.info("stage=questions done course=%s questions=%d", course, len(generated))
     return {"questions": len(generated)}
 
 

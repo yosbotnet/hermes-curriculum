@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from curriculum import cli
@@ -124,6 +127,54 @@ class DoctorTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 code = cli.main(["doctor"])
         self.assertNotEqual(code, 0)
+
+    def test_doctor_reports_log_dir(self) -> None:
+        # doctor gains one line for the build-log directory and whether it is
+        # writable, following the existing OK/MISS probe style.
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"CURRICULUM_LOG_DIR": directory}
+            with mock.patch.dict(os.environ, env, clear=False):
+                with mock.patch.object(
+                    cli, "_check_db", return_value=("database", False, "skipped in test")
+                ):
+                    with redirect_stdout(out):
+                        cli.main(["doctor"])
+        printed = out.getvalue().lower()
+        self.assertIn("log dir", printed)
+
+
+class BuildLogPathTest(unittest.TestCase):
+    """The build/ingest/link/questions commands print the durable log path to
+    stdout at the START of the run so the operator can find it later even if the
+    run is killed."""
+
+    def test_ingest_prints_log_path_to_stdout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "corpus.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {"course": "C", "sources": [{"path": "a.txt", "token": "a"}]}
+                ),
+                encoding="utf-8",
+            )
+            out = io.StringIO()
+            env = {"CURRICULUM_LOG_DIR": directory}
+            with mock.patch.dict(os.environ, env, clear=False):
+                # Stub the orchestration so the test stays offline: we only assert
+                # the CLI's log-path plumbing, not a real ingest.
+                with mock.patch(
+                    "curriculum.app.build.ingest", return_value={"files": 0}
+                ):
+                    with redirect_stdout(out):
+                        code = cli.main(["ingest", str(manifest_path)])
+            self.assertEqual(code, 0)
+            printed = out.getvalue()
+            self.assertIn("build-", printed)  # the log filename prefix
+            self.assertIn(directory, printed)  # under the overridden log dir
+            # A log file was actually created under the override dir.
+            logs = list(Path(directory).glob("build-*.log"))
+            self.assertTrue(logs, "expected a build log file to be created")
 
 
 class CheckTest(unittest.TestCase):

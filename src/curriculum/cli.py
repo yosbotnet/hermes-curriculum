@@ -105,6 +105,32 @@ def _compose(compose_args: list[str]) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Build logging: every build-side command opens ONE durable log file and prints
+# its path up front, so diagnostics survive a stall/timeout/kill (issue #3). The
+# helpers are lazy-imported to keep ``--help``/``doctor`` free of the app layer.
+# --------------------------------------------------------------------------- #
+def _open_build_log(settings: Settings, command: str):
+    """Open this invocation's durable build log and announce its path.
+
+    The path is printed to stdout at the START of the run so the operator can
+    find the artifact later even if the build is killed before it prints results.
+    Returns ``(logger, path)``.
+    """
+    from .app.build_logging import start_build_log
+
+    logger, path = start_build_log(settings, command)
+    print(f"curriculum: build log -> {path}")
+    return logger, path
+
+
+def _close_build_log(logger) -> None:
+    """Flush and detach the build log's handlers (safe in a ``finally``)."""
+    from .app.build_logging import close_build_log
+
+    close_build_log(logger)
+
+
+# --------------------------------------------------------------------------- #
 # Build-side command handlers (each lazy-imports curriculum.app.build).
 # --------------------------------------------------------------------------- #
 def _cmd_db_up(args: argparse.Namespace, settings: Settings) -> int:
@@ -129,8 +155,15 @@ def _cmd_ingest(args: argparse.Namespace, settings: Settings) -> int:
     """Ingest a manifest's sources into the concept/edge graph."""
     from .app import build
 
-    manifest = build.load_manifest(args.manifest)
-    _emit(build.ingest(manifest, settings))
+    logger, _ = _open_build_log(settings, "ingest")
+    try:
+        manifest = build.load_manifest(args.manifest)
+        _emit(build.ingest(manifest, settings, logger=logger))
+    except Exception as exc:  # noqa: BLE001 - record then re-raise for a clean exit
+        logger.error("command=ingest failed: %s: %s", type(exc).__name__, exc)
+        raise
+    finally:
+        _close_build_log(logger)
     return 0
 
 
@@ -138,7 +171,14 @@ def _cmd_link(args: argparse.Namespace, settings: Settings) -> int:
     """Link isolated concepts via embedding-guided edge repair."""
     from .app import build
 
-    _emit(build.link(settings, _course(args, settings)))
+    logger, _ = _open_build_log(settings, "link")
+    try:
+        _emit(build.link(settings, _course(args, settings), logger=logger))
+    except Exception as exc:  # noqa: BLE001 - record then re-raise for a clean exit
+        logger.error("command=link failed: %s: %s", type(exc).__name__, exc)
+        raise
+    finally:
+        _close_build_log(logger)
     return 0
 
 
@@ -146,7 +186,14 @@ def _cmd_questions(args: argparse.Namespace, settings: Settings) -> int:
     """Generate exam questions over the persisted graph (batched)."""
     from .app import build
 
-    _emit(build.generate_questions(settings, _course(args, settings)))
+    logger, _ = _open_build_log(settings, "questions")
+    try:
+        _emit(build.generate_questions(settings, _course(args, settings), logger=logger))
+    except Exception as exc:  # noqa: BLE001 - record then re-raise for a clean exit
+        logger.error("command=questions failed: %s: %s", type(exc).__name__, exc)
+        raise
+    finally:
+        _close_build_log(logger)
     return 0
 
 
@@ -160,16 +207,23 @@ def _cmd_build(args: argparse.Namespace, settings: Settings) -> int:
     """
     from .app import build
 
-    manifest = build.load_manifest(args.manifest)
-    course = manifest["course"]
-    _emit({"stage": "ingest", "result": build.ingest(manifest, settings)})
-    _emit({"stage": "link", "result": build.link(settings, course)})
-    _emit(
-        {
-            "stage": "questions",
-            "result": build.generate_questions(settings, course),
-        }
-    )
+    logger, _ = _open_build_log(settings, "build")
+    try:
+        manifest = build.load_manifest(args.manifest)
+        course = manifest["course"]
+        _emit({"stage": "ingest", "result": build.ingest(manifest, settings, logger=logger)})
+        _emit({"stage": "link", "result": build.link(settings, course, logger=logger)})
+        _emit(
+            {
+                "stage": "questions",
+                "result": build.generate_questions(settings, course, logger=logger),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - record then re-raise for a clean exit
+        logger.error("command=build failed: %s: %s", type(exc).__name__, exc)
+        raise
+    finally:
+        _close_build_log(logger)
     return 0
 
 
@@ -386,6 +440,22 @@ def _check_bundle(settings: Settings) -> tuple[str, bool, str]:
     return ("okf bundle", False, f"{path} (missing; created on first ingest)")
 
 
+def _check_log_dir(settings: Settings) -> tuple[str, bool, str]:
+    """Is the build-log directory writable (so a failed run leaves an artifact)?
+
+    Side-effect free like the other probes: it never creates the directory. If
+    the dir exists we probe it directly; otherwise we probe the parent, since the
+    dir is created on the first build -- so a pre-build ``doctor`` still reports
+    honestly whether the eventual write will succeed.
+    """
+    path = os.path.abspath(settings.log_dir)
+    probe = path if os.path.isdir(path) else (os.path.dirname(path) or ".")
+    if os.access(probe, os.W_OK):
+        detail = path if os.path.isdir(path) else f"{path} (created on first build)"
+        return ("log dir", True, detail)
+    return ("log dir", False, f"{path} (not writable)")
+
+
 def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """Print an OK/MISS checklist of the build prerequisites; non-zero if any miss.
 
@@ -397,6 +467,7 @@ def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
         _check_db(settings),
         _check_api_key(settings),
         _check_bundle(settings),
+        _check_log_dir(settings),
     ]
     all_ok = True
     for label, ok, detail in checks:
