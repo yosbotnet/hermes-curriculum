@@ -18,7 +18,13 @@ import unittest
 from pathlib import Path
 
 from curriculum.app import build
+from curriculum.domain.entities import Concept, SourceRef
+from curriculum.domain.enums import EdgeType
 from curriculum.domain.errors import ConfigError
+from curriculum.storage.memory import (
+    InMemoryConceptIndexRepository,
+    InMemoryEdgeRepository,
+)
 
 
 def _write_manifest(directory: str, payload: object) -> str:
@@ -147,6 +153,124 @@ class LoadManifestMalformedTest(unittest.TestCase):
             missing = str(Path(directory) / "does-not-exist.json")
             with self.assertRaises(ConfigError):
                 build.load_manifest(missing)
+
+
+def _concept(cid: str, line: int, source: str) -> Concept:
+    """A concept grounded at ``source``:``line`` (a spine source's citation)."""
+    return Concept(id=cid, course="C", title=cid, source_refs=(SourceRef(source, line),))
+
+
+class SpineStitchTest(unittest.TestCase):
+    """Cross-source spine stitching (``build._spine_stitch_edges``).
+
+    A pure, offline unit: given the manifest sources (with their ``spine`` flag
+    and ``token``) and the per-source-index lists of persisted concepts, it
+    stitches consecutive spine sources -- in manifest order -- with exactly one
+    ``tail(A) -> head(B)`` PREREQUISITE edge per adjacent spine pair.
+    """
+
+    def test_two_spine_sources_get_one_cross_edge_tail_to_head(self) -> None:
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        # Concepts supplied OUT of document order so the assertion proves the
+        # stitch sorts by first source_ref line (tail = a2@20, head = b1@10).
+        concepts = {
+            0: [_concept("C/a2", 20, "chA"), _concept("C/a1", 10, "chA")],
+            1: [_concept("C/b2", 20, "chB"), _concept("C/b1", 10, "chB")],
+        }
+        edges = build._spine_stitch_edges(sources, concepts)
+
+        self.assertEqual(len(edges), 1)
+        edge = edges[0]
+        self.assertEqual((edge.src, edge.dst), ("C/a2", "C/b1"))
+        self.assertIs(edge.type, EdgeType.PREREQUISITE)
+        self.assertEqual(edge.provenance, "spine")
+        self.assertEqual(edge.confidence, 1.0)
+        self.assertEqual(edge.rationale, "spine order: chA -> chB")
+        self.assertIsNotNone(edge.source_ref)
+        self.assertEqual(edge.source_ref.file, "chA")
+        self.assertEqual(edge.source_ref.line, 20)  # the tail concept's first ref
+
+    def test_satellite_between_two_spines_does_not_break_adjacency(self) -> None:
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "s.txt", "token": "sat"},  # satellite: no spine flag
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        concepts = {
+            0: [_concept("C/a1", 10, "chA"), _concept("C/a2", 20, "chA")],
+            1: [_concept("C/s1", 10, "sat")],  # satellite concepts
+            2: [_concept("C/b1", 10, "chB"), _concept("C/b2", 20, "chB")],
+        }
+        edges = build._spine_stitch_edges(sources, concepts)
+
+        self.assertEqual(len(edges), 1)
+        self.assertEqual((edges[0].src, edges[0].dst), ("C/a2", "C/b1"))
+        # No stitch edge touches a satellite concept.
+        touched = {e.src for e in edges} | {e.dst for e in edges}
+        self.assertNotIn("C/s1", touched)
+
+    def test_single_spine_source_makes_no_cross_edge(self) -> None:
+        sources = [{"path": "a.txt", "token": "chA", "spine": True}]
+        concepts = {0: [_concept("C/a1", 10, "chA"), _concept("C/a2", 20, "chA")]}
+        self.assertEqual(build._spine_stitch_edges(sources, concepts), [])
+
+    def test_zero_concept_spine_source_is_skipped_neighbors_stitched(self) -> None:
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "e.txt", "token": "chEmpty", "spine": True},
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        concepts = {
+            0: [_concept("C/a1", 10, "chA"), _concept("C/a2", 20, "chA")],
+            1: [],  # produced zero concepts -> its neighbors become adjacent
+            2: [_concept("C/b1", 10, "chB"), _concept("C/b2", 20, "chB")],
+        }
+        edges = build._spine_stitch_edges(sources, concepts)
+
+        self.assertEqual(len(edges), 1)
+        self.assertEqual((edges[0].src, edges[0].dst), ("C/a2", "C/b1"))
+        self.assertEqual(edges[0].rationale, "spine order: chA -> chB")
+
+    def test_missing_source_index_is_treated_as_zero_concepts(self) -> None:
+        # A source that failed to ingest never lands in the index->concepts map;
+        # it must be skipped exactly like an empty one.
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "e.txt", "token": "chEmpty", "spine": True},
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        concepts = {
+            0: [_concept("C/a1", 10, "chA")],
+            2: [_concept("C/b1", 10, "chB")],
+        }
+        edges = build._spine_stitch_edges(sources, concepts)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual((edges[0].src, edges[0].dst), ("C/a1", "C/b1"))
+
+    def test_stitch_is_deterministic_and_upsert_idempotent(self) -> None:
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        concepts = {
+            0: [_concept("C/a1", 10, "chA"), _concept("C/a2", 20, "chA")],
+            1: [_concept("C/b1", 10, "chB"), _concept("C/b2", 20, "chB")],
+        }
+        first = build._spine_stitch_edges(sources, concepts)
+        second = build._spine_stitch_edges(sources, concepts)
+        self.assertEqual(first, second)  # deterministic, order and shape
+
+        # Persisting twice must not duplicate: the edge repo is keyed by the
+        # synthetic (src, type, dst) id, so a re-run upserts in place.
+        edges_repo = InMemoryEdgeRepository(InMemoryConceptIndexRepository())
+        for edge in first:
+            edges_repo.upsert(edge)
+        for edge in second:
+            edges_repo.upsert(edge)
+        self.assertEqual(len(edges_repo.out_edges("C/a2")), 1)
 
 
 class ModuleImportsOfflineTest(unittest.TestCase):

@@ -57,7 +57,27 @@ __all__ = [
     "InferEdgesPass",
     "QuestionGenPass",
     "VerifyPass",
+    "spine_within_source_key",
 ]
+
+
+def spine_within_source_key(concept: Concept) -> tuple[float, str]:
+    """Order a single source's concepts the way :class:`SpinePass` does internally.
+
+    :class:`SpinePass` sorts a spine source's concepts by
+    ``(source order in corpus, first source_ref line, id)``. Within ONE source
+    the corpus-order component is constant, so the remaining, reusable key is the
+    first cited line ascending (a concept with no line falls to the end) with the
+    concept id as the deterministic tiebreak. Exported so cross-source stitching
+    (in :mod:`curriculum.app.build`) can pick a source's head/tail concept with
+    exactly the ordering SpinePass uses for its intra-source chain, rather than
+    re-deriving -- and risking diverging from -- that key.
+    """
+    first_line = min(
+        (ref.line for ref in concept.source_refs if ref.line is not None),
+        default=math.inf,
+    )
+    return (first_line, concept.id)
 
 # Tag stamped on every generated Question so its provenance (which pass minted
 # it) is auditable downstream. Kept ASCII and stable -- it is persisted.
@@ -580,11 +600,10 @@ class SpinePass(IngestionPass):
             source_name, order_index = attribution
             if source_name not in ctx.spine_sources:
                 continue
-            first_line = min(
-                (ref.line for ref in concept.source_refs if ref.line is not None),
-                default=math.inf,
-            )
-            annotated.append((order_index, first_line, concept.id, concept))
+            # Delegate the within-source component to the shared helper so the
+            # stitch step (app/build.py) can never drift from this ordering.
+            first_line, concept_id = spine_within_source_key(concept)
+            annotated.append((order_index, first_line, concept_id, concept))
         annotated.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
         return [entry[3] for entry in annotated]
 

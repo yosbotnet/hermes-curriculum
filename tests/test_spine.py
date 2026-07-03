@@ -214,5 +214,56 @@ class InferEdgesAuditTest(unittest.TestCase):
         self.assertEqual(related[0].provenance, "inferred")
 
 
+# --------------------------------------------------------------------------- #
+# Cross-source spine stitching (build orchestration).
+# --------------------------------------------------------------------------- #
+class SpineCrossSourceStitchTest(unittest.TestCase):
+    """SpinePass chains WITHIN a source; the build stitches ACROSS sources.
+
+    Each spine file is ingested through its own pipeline run, so SpinePass only
+    ever lays intra-source edges. After the whole corpus is ingested, the build
+    stitches consecutive spine sources with one ``tail(A) -> head(B)`` edge, so
+    a spine split across per-chapter files is no longer disconnected.
+    """
+
+    def _run_spine_source(self, token: str, pairs) -> IngestionContext:
+        ctx = IngestionContext(course=COURSE, spine_sources={token})
+        for cid, line in pairs:
+            ctx.concepts.append(
+                Concept(id=cid, course=COURSE, title=cid, source_refs=(SourceRef(token, line),))
+            )
+            ctx.source_of[cid] = (token, 0)
+        SpinePass().run(ctx)
+        return ctx
+
+    def test_intra_source_chains_plus_one_cross_edge(self) -> None:
+        from curriculum.app import build
+
+        ctx_a = self._run_spine_source("chA", (("algo101/a1", 10), ("algo101/a2", 20)))
+        ctx_b = self._run_spine_source("chB", (("algo101/b1", 10), ("algo101/b2", 20)))
+
+        # SpinePass laid the intra-source chains, one per file.
+        self.assertEqual(
+            [(e.src, e.dst) for e in ctx_a.edges], [("algo101/a1", "algo101/a2")]
+        )
+        self.assertEqual(
+            [(e.src, e.dst) for e in ctx_b.edges], [("algo101/b1", "algo101/b2")]
+        )
+
+        sources = [
+            {"path": "a.txt", "token": "chA", "spine": True},
+            {"path": "b.txt", "token": "chB", "spine": True},
+        ]
+        cross = build._spine_stitch_edges(sources, {0: ctx_a.concepts, 1: ctx_b.concepts})
+
+        # Exactly one cross edge, tail of A -> head of B, with the trusted shape.
+        self.assertEqual([(e.src, e.dst) for e in cross], [("algo101/a2", "algo101/b1")])
+        edge = cross[0]
+        self.assertIs(edge.type, EdgeType.PREREQUISITE)
+        self.assertEqual(edge.provenance, "spine")
+        self.assertEqual(edge.confidence, 1.0)
+        self.assertEqual(edge.rationale, "spine order: chA -> chB")
+
+
 if __name__ == "__main__":
     unittest.main()
