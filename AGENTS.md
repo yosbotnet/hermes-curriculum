@@ -146,6 +146,52 @@ your job is to turn those materials into text files plus a `corpus.json`. Loop u
    usually means an extract failed. `--json` gives the machine-readable report.
 7. **Build.** `curriculum build corpus.json` once validation is clean.
 
+## Discovering a corpus from a goal (agent runbook)
+
+The runbook above assumes the user already HAS materials. This one is for the
+"unknown unknowns" case: the user hands you a goal ("I want to understand diffusion
+models") or a seed artifact (a paper they plan to read) and no course materials at
+all. Your job is to derive the syllabus, fetch what you legitimately can, and hand
+the user a precise shopping list for the rest. A seed artifact is just a goal with
+extra grounding -- one flow covers both.
+
+1. **Deconstruct the goal.** Identify the target concepts. For a seed paper, work
+   backward from what it ASSUMES: terms used without definition, notation, and the
+   background its citations stand in for. The output of this step is the concept
+   territory the course must cover, ending at the goal.
+2. **Propose a syllabus.** An ordered concept sequence from "learnable from cold"
+   to the goal -- this ordering is the future spine. For each segment, list
+   candidate sources in two categories:
+   - **fetchable**: openly published material you may retrieve yourself -- arXiv /
+     open-access papers, official documentation, open textbooks (OpenStax and
+     similar), lecture notes published by their authors, encyclopedic glue.
+   - **procure**: paywalled, licensed, or license-ambiguous material. Never fetch
+     these; each becomes a `procure` slot with a precise ask.
+3. **Get the ordering ratified.** Present the syllabus ordering to the user and
+   revise until they approve. This is a hard gate: their approval is the human
+   vetting that justifies `"spine": true` -- do not fetch, write the manifest, or
+   build before it.
+4. **Fetch and extract.** Retrieve the fetchable sources into `materials/` and
+   extract to plain text (same extraction/cleaning rules as the runbook above).
+5. **Write the manifest.** `corpus.json` with every slot declared now: filled
+   slots as ordinary sources, unfilled ones with a `"procure"` instruction telling
+   the user exactly what to obtain and how to extract it, e.g.:
+   ```json
+   { "path": "materials/textbook-ch3-5.txt", "token": "textbook-ch3-5",
+     "spine": true,
+     "procure": "Extract chapters 3-5 of <book> (you own it) to plain UTF-8 text." }
+   ```
+   Spine ordering = manifest order of the spine sources, exactly as ratified. A
+   pending spine slot is fine: stitching chains its neighbours directly until the
+   file arrives, then a rebuild reinserts it.
+6. **Validate and build immediately.** `corpus-validate` reports procure slots as
+   `pending` (a warning, never an error) and `build` skips them with a log line --
+   so the user starts learning from the fetched material now, before procurement
+   is complete.
+7. **Iterate as slots fill.** When the user procures an item, extract it to the
+   declared `path` (the `procure` note becomes inert once the file exists),
+   re-validate, and re-run `curriculum build corpus.json`.
+
 ## How it works
 
 **The OKF / Postgres split (polyglot, single-ownership).** Two stores, neither

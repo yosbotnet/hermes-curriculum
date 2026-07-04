@@ -92,9 +92,9 @@ def load_manifest(path: str) -> dict:
     because a malformed manifest would otherwise surface much later as an opaque
     error mid-ingest (after paid inference has already been spent); any defect
     raises :class:`curriculum.domain.errors.ConfigError` with a pointed message.
-    The returned dict is normalised -- ``sources`` carries exactly ``path`` and
-    ``token`` per entry -- so downstream code can trust the shape without
-    re-checking it.
+    The returned dict is normalised -- ``sources`` carries ``path`` and ``token``
+    per entry, plus ``spine: True`` and/or a ``procure`` instruction only when
+    declared -- so downstream code can trust the shape without re-checking it.
 
     Path resolution (single source of truth): each source ``path`` is resolved to
     an ABSOLUTE path against the MANIFEST FILE's own directory, never the process
@@ -154,6 +154,20 @@ def load_manifest(path: str) -> dict:
         normalised: dict[str, Any] = {"path": resolved_path, "token": token}
         if bool(source.get("spine", False)):
             normalised["spine"] = True
+        # ``procure`` marks a declared-but-unfilled slot: an instruction telling
+        # the USER what to go get for this path (see the AGENTS.md corpus
+        # discovery runbook). While the file is missing, validate reports the
+        # slot as "pending" instead of an error and ingest skips it, so a
+        # partially procured corpus still builds; once the file exists the note
+        # is inert.
+        procure = source.get("procure")
+        if procure is not None:
+            if not isinstance(procure, str) or not procure.strip():
+                raise ConfigError(
+                    f"manifest source #{index} 'procure' must be a non-empty "
+                    "string describing what to obtain for this path"
+                )
+            normalised["procure"] = procure.strip()
         normalised_sources.append(normalised)
 
     chunk_lines = data.get("chunk_lines", _DEFAULT_CHUNK_LINES)
@@ -219,10 +233,26 @@ def ingest(
     # never lands here and is skipped when neighbours are stitched.
     concepts_by_index: dict[int, list[Concept]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(_ingest_source, source, manifest, settings, content): index
-            for index, source in enumerate(sources)
-        }
+        futures = {}
+        for index, source in enumerate(sources):
+            # A declared-but-unfilled slot (missing file + procure instruction)
+            # is not a failure: the user has not procured that material yet.
+            # Skip it -- with a durable log line naming what is still pending --
+            # and build with everything else, so a partially procured corpus is
+            # learnable now and simply re-built as slots are filled. A missing
+            # file WITHOUT a procure note still fails below, as before. Skipped
+            # sources never enter concepts_by_index, so spine stitching chains
+            # their neighbours directly until the slot is filled.
+            if source.get("procure") and not Path(source["path"]).is_file():
+                log.info(
+                    "stage=ingest source pending procurement token=%s path=%s "
+                    "procure=%s",
+                    source["token"], source["path"], source["procure"],
+                )
+                continue
+            futures[executor.submit(
+                _ingest_source, source, manifest, settings, content
+            )] = index
         for future in as_completed(futures):
             index = futures[future]
             source = sources[index]

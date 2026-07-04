@@ -175,6 +175,71 @@ class ValidatePerSourceErrorTest(unittest.TestCase):
             self.assertIn("empty", " ".join(report["errors"]).lower())
 
 
+class ValidatePendingProcurementTest(unittest.TestCase):
+    def test_missing_file_with_procure_is_pending_not_error(self) -> None:
+        # A declared-but-unfilled slot (missing file + procure instruction) must
+        # not block the build: it is a distinct "pending" status and a warning
+        # carrying the procurement instruction, so the agent's zero-errors loop
+        # passes and the user knows exactly what to go get.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.txt").write_text("teaching text " * 50, encoding="utf-8")
+            manifest = _write_manifest(
+                root,
+                [
+                    {"path": "a.txt", "token": "a"},
+                    {"path": "nope.txt", "token": "n",
+                     "procure": "extract chapter 3 of the owned textbook"},
+                ],
+            )
+            report = corpus_tools.validate(str(manifest))
+        self.assertEqual(report["errors"], [])
+        rows = {row["token"]: row for row in report["sources"]}
+        self.assertEqual(rows["n"]["status"], "pending")
+        self.assertEqual(rows["a"]["status"], "ok")
+        blob = " ".join(report["warnings"])
+        self.assertIn("pending procurement", blob)
+        self.assertIn("extract chapter 3 of the owned textbook", blob)
+
+    def test_present_file_with_procure_is_ordinary(self) -> None:
+        # Once the user drops the file in, the procure note is inert: the slot
+        # is filled and validates like any other source.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.txt").write_text("teaching text " * 50, encoding="utf-8")
+            manifest = _write_manifest(
+                root,
+                [{"path": "a.txt", "token": "a", "procure": "already done"}],
+            )
+            report = corpus_tools.validate(str(manifest))
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["sources"][0]["status"], "ok")
+        self.assertNotIn("pending procurement", " ".join(report["warnings"]))
+
+    def test_pending_spine_warns_pending_not_the_generic_no_spine_advice(self) -> None:
+        # A spine slot that is still pending supplies no ordering for THIS
+        # build, so a warning must fire -- but the pointed one ("your spine is
+        # still pending"), not the generic "consider marking spine:true"
+        # advice, which would be misleading when a spine IS declared.
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.txt").write_text("teaching text " * 50, encoding="utf-8")
+            manifest = _write_manifest(
+                root,
+                [
+                    {"path": "a.txt", "token": "a"},
+                    {"path": "spine.txt", "token": "s", "spine": True,
+                     "procure": "extract the textbook chapters"},
+                ],
+            )
+            report = corpus_tools.validate(str(manifest))
+        self.assertEqual(report["errors"], [])
+        blob = " ".join(report["warnings"])
+        self.assertIn("spine", blob)
+        self.assertIn("pending", blob)
+        self.assertNotIn("consider marking a trusted ordering", blob)
+
+
 class ValidateWarningTest(unittest.TestCase):
     def test_short_file_is_a_warning_not_an_error(self) -> None:
         with TemporaryDirectory() as directory:

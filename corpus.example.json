@@ -6,6 +6,7 @@
     { "_comment": "Set spine:true on a source whose ordering is human-vetted (e.g. a textbook's chapter sequence). Its concepts are chained into trusted prerequisite edges (confidence 1.0) in document order; LLM inference may only add lower-confidence cross-links and can never overwrite these.", "path": "materials/textbook.txt", "token": "textbook", "spine": true },
     { "path": "materials/lecture-01-intro.txt", "token": "lecture-01-intro" },
     { "path": "materials/lecture-02-core.txt", "token": "lecture-02-core" },
-    { "path": "materials/tutorial-01.txt", "token": "tutorial-01" }
+    { "path": "materials/tutorial-01.txt", "token": "tutorial-01" },
+    { "_comment": "A 'procure' instruction declares a slot you still have to fill: while its file is missing, corpus-validate reports the source as pending (a warning, not an error) and build skips it, so a partially procured corpus still builds. Drop the extracted text at 'path' and rebuild; the note is inert once the file exists.", "path": "materials/textbook-ch09.txt", "token": "textbook-ch09", "procure": "Extract chapter 9 of the course textbook (you own it) to plain UTF-8 text." }
   ]
 }

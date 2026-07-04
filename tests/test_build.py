@@ -13,6 +13,7 @@ network present (the heavy collaborators are deferred to call time).
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,6 +128,107 @@ class LoadManifestHappyPathTest(unittest.TestCase):
             manifest = build.load_manifest(path)
         self.assertEqual(manifest["course"], "YourCourse")
         self.assertEqual(len(manifest["sources"]), 1)
+
+
+class LoadManifestProcureTest(unittest.TestCase):
+    def test_procure_instruction_is_preserved(self) -> None:
+        # A "procure" instruction marks a slot the user still has to fill (see
+        # the AGENTS.md corpus-discovery runbook); it must survive normalisation
+        # so validate/build can report and skip the pending source.
+        with tempfile.TemporaryDirectory() as directory:
+            path = _write_manifest(
+                directory,
+                {
+                    "course": "C",
+                    "sources": [
+                        {"path": "a.txt", "token": "a",
+                         "procure": "Extract ch. 3-5 of Sutton & Barto to a.txt"},
+                        {"path": "b.txt", "token": "b"},
+                    ],
+                },
+            )
+            manifest = build.load_manifest(path)
+        self.assertEqual(
+            manifest["sources"][0]["procure"],
+            "Extract ch. 3-5 of Sutton & Barto to a.txt",
+        )
+        self.assertNotIn("procure", manifest["sources"][1])
+
+    def test_procure_must_be_a_nonempty_string(self) -> None:
+        for bad in (5, True, "", "   ", ["get it"]):
+            with tempfile.TemporaryDirectory() as directory:
+                path = _write_manifest(
+                    directory,
+                    {"course": "C",
+                     "sources": [{"path": "a.txt", "token": "a", "procure": bad}]},
+                )
+                with self.assertRaises(ConfigError):
+                    build.load_manifest(path)
+
+
+class IngestPendingSourceTest(unittest.TestCase):
+    def test_pending_source_is_skipped_and_logged_others_ingest(self) -> None:
+        # A source whose file is missing AND that carries a procure instruction
+        # is a declared-but-unfilled slot: the build must skip it (with a log
+        # line naming what is pending) and still ingest everything else, so the
+        # user starts learning before procurement is complete.
+        from unittest import mock
+
+        from curriculum.config import Settings
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "a.txt").write_text("teaching text " * 50, encoding="utf-8")
+            path = _write_manifest(
+                directory,
+                {
+                    "course": "C",
+                    "sources": [
+                        {"path": "a.txt", "token": "a"},
+                        {"path": "missing.txt", "token": "m",
+                         "procure": "extract chapter 3 to missing.txt"},
+                    ],
+                },
+            )
+            manifest = build.load_manifest(path)
+            settings = Settings(api_key="k", okf_bundle_path=str(root / "bundle"))
+            fake = mock.Mock(
+                return_value={"concepts": 1, "edges": 0, "concept_list": []}
+            )
+            logger = logging.getLogger("test.ingest.pending")
+            with mock.patch.object(build, "_ingest_source", fake):
+                with self.assertLogs(logger, level="INFO") as captured:
+                    counts = build.ingest(manifest, settings, logger=logger)
+
+        ingested_tokens = [call.args[0]["token"] for call in fake.call_args_list]
+        self.assertEqual(ingested_tokens, ["a"])
+        self.assertEqual(counts["files"], 1)
+        blob = "\n".join(captured.output)
+        self.assertIn("pending", blob)
+        self.assertIn("m", blob)
+
+    def test_missing_file_without_procure_is_still_a_failure(self) -> None:
+        # No procure instruction means a plain broken manifest: the source must
+        # keep surfacing as a failed source, not silently skip.
+        from unittest import mock
+
+        from curriculum.config import Settings
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = _write_manifest(
+                directory,
+                {"course": "C",
+                 "sources": [{"path": "missing.txt", "token": "m"}]},
+            )
+            manifest = build.load_manifest(path)
+            settings = Settings(api_key="k", okf_bundle_path=str(root / "bundle"))
+            logger = logging.getLogger("test.ingest.broken")
+            with self.assertLogs(logger, level="ERROR") as captured:
+                counts = build.ingest(manifest, settings, logger=logger)
+
+        self.assertEqual(counts["files"], 0)
+        self.assertIn("failed", "\n".join(captured.output))
 
 
 class LoadManifestMalformedTest(unittest.TestCase):

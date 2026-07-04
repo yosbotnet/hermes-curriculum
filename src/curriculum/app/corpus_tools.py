@@ -144,6 +144,9 @@ def validate(manifest_path: str) -> dict:
     Each source is then read and classified (order matters -- the first failing
     check wins, so a binary file is reported as binary, not as "non-UTF-8"):
 
+    * missing file with a ``procure`` instruction -> "pending" (a warning, not
+      an error: the slot is declared but the user has not obtained the material
+      yet; the build proceeds without it);
     * missing file -> error;
     * binary sniff on the first bytes -> error with a pointed hint: a ``%PDF-``
       magic says extract the PDF's text first, a ``PK\\x03\\x04`` (zip container:
@@ -181,6 +184,7 @@ def validate(manifest_path: str) -> dict:
     chunk_lines = manifest["chunk_lines"]
     total_chunks = 0
     any_clean_spine = False
+    any_pending_spine = False
 
     for source in manifest["sources"]:
         row = _check_source(source, chunk_lines)
@@ -191,22 +195,36 @@ def validate(manifest_path: str) -> dict:
             report["errors"].append(f"[{source['token']}] {row['error']}")
         if row["warning"]:
             report["warnings"].append(f"[{source['token']}] {row['warning']}")
-        # Anything that is not a hard error WILL be ingested (an "ok" source and a
-        # short-but-valid "warning" source alike), so its chunks count toward the
-        # cost estimate and, when it is a spine, it supplies a usable ordering.
-        # Gating these on status == "ok" undercounts cost and spuriously warns
-        # "no spine" for a spine whose only defect is the short-file warning.
-        if row["status"] != "error":
+        # Anything that is not a hard error and not still pending WILL be
+        # ingested (an "ok" source and a short-but-valid "warning" source
+        # alike), so its chunks count toward the cost estimate and, when it is
+        # a spine, it supplies a usable ordering. Gating these on status ==
+        # "ok" undercounts cost and spuriously warns "no spine" for a spine
+        # whose only defect is the short-file warning. A "pending" spine slot
+        # supplies NO ordering for this build (its file does not exist yet), so
+        # it must not silence the no-spine warning.
+        if row["status"] not in ("error", "pending"):
             total_chunks += row["chunks"]
             if source.get("spine"):
                 any_clean_spine = True
+        if row["status"] == "pending" and source.get("spine"):
+            any_pending_spine = True
 
     if not any_clean_spine:
-        report["warnings"].append(
-            "no spine source: all prerequisite edges will be inferred; consider "
-            "marking a trusted ordering with \"spine\": true on the source whose "
-            "sequence is editorially vetted"
-        )
+        # Two different situations deserve two different messages: a spine that
+        # is DECLARED but still pending procurement (the fix is to procure it),
+        # versus no spine declared at all (the fix is to mark one).
+        if any_pending_spine:
+            report["warnings"].append(
+                "spine source still pending procurement: all prerequisite edges "
+                "will be inferred until it is procured and the corpus rebuilt"
+            )
+        else:
+            report["warnings"].append(
+                "no spine source: all prerequisite edges will be inferred; consider "
+                "marking a trusted ordering with \"spine\": true on the source whose "
+                "sequence is editorially vetted"
+            )
 
     report["estimate"] = {
         "chunks": total_chunks,
@@ -220,7 +238,8 @@ def _check_source(source: dict, chunk_lines: int) -> dict:
     """Classify one source file, returning its per-source report row.
 
     The row is ``{token, path, status, error, warning, lines, chunks}``: ``status``
-    is ``"ok"``, ``"error"``, or ``"warning"``; ``error``/``warning`` hold the
+    is ``"ok"``, ``"error"``, ``"warning"``, or ``"pending"`` (declared slot
+    whose file the user still has to procure); ``error``/``warning`` hold the
     single most pointed message (or ``""``); ``lines``/``chunks`` are populated
     only once the file decodes (0 otherwise). ``source['path']`` is trusted as-is:
     :func:`curriculum.app.build.load_manifest` has already resolved it to an
@@ -242,6 +261,16 @@ def _check_source(source: dict, chunk_lines: int) -> dict:
     }
 
     if not path.is_file():
+        procure = source.get("procure")
+        if procure:
+            # A declared-but-unfilled slot: the manifest carries an instruction
+            # telling the user what to obtain for this path. Not an error -- the
+            # build proceeds without it (incremental corpus discovery) -- but a
+            # distinct "pending" status so the agent and the human both see
+            # exactly which materials are still outstanding.
+            row["status"] = "pending"
+            row["warning"] = f"pending procurement: {procure}"
+            return row
         row["status"] = "error"
         row["error"] = f"missing file: {raw_path} does not exist"
         return row

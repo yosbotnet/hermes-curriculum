@@ -34,6 +34,13 @@ then loop `curriculum corpus-validate corpus.json` until it reports zero errors 
 building. The **[AGENTS.md](AGENTS.md)** "Preparing a corpus from raw materials" section
 is the full agent runbook (extraction tools, spine rules, the validate-then-build loop).
 
+No materials at all -- just a goal or a paper you want to understand? The AGENTS.md
+"Discovering a corpus from a goal" runbook has the agent derive the syllabus, fetch the
+openly published sources itself, and mark everything else as a `"procure"` slot in
+`corpus.json`: a precise ask for material only you can supply. Pending slots are
+warnings, not errors -- the build runs with whatever is filled, and you rebuild as
+you procure the rest.
+
 Run `.venv/bin/curriculum doctor` first to check prerequisites (docker, DB, key, bundle).
 Tests need neither a database nor a key: `make test`.
 
