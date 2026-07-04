@@ -24,6 +24,7 @@ from ..domain.entities import (
     Concept,
     ConceptContent,
     CourseProfile,
+    Edge,
     EngineConfig,
     LearnerState,
     NextAction,
@@ -128,18 +129,27 @@ class CurriculumApplicationService(CurriculumService):
         """No retention signal yet -- same rule as snapshot.unlock_proximity."""
         return state is None or state.stability is None
 
-    def _prereqs_satisfied(self, concept_id: str) -> bool:
-        """A concept is learnable when every SPINE prerequisite is mastered (SOLID+).
+    def _gating_prereqs(self, concept_id: str) -> list[Edge]:
+        """The incoming PREREQUISITE edges that actually gate unlocking.
 
-        Only human-vetted spine edges (confidence=1.0) gate the unlock, not
-        LLM-inferred ones. Inferred prerequisites are useful cross-links for
-        connection-based questioning, but trusting them as hard gates can close
-        all entry points into a densely connected graph — a single inferred edge
-        targeting every spine-head concept leaves nothing learnable from cold.
+        Only human-vetted edges gate: spine chains and manual curation. LLM-
+        inferred prerequisites are useful cross-links for connection-based
+        questioning, but trusting them as hard gates can close all entry points
+        into a densely connected graph -- a single inferred edge targeting every
+        entry concept leaves nothing learnable from cold. Every unlock reading
+        (the gate itself, unlocks_ready, near_unlocks, the frontier
+        breakthrough bucket) must draw from this ONE filter or checkin can call
+        a concept simultaneously "ready" and "N prerequisites away".
         """
-        for e in self._edges.in_edges(concept_id, EdgeType.PREREQUISITE):
-            if e.provenance != "spine":
-                continue
+        return [
+            e
+            for e in self._edges.in_edges(concept_id, EdgeType.PREREQUISITE)
+            if e.provenance != "inferred"
+        ]
+
+    def _prereqs_satisfied(self, concept_id: str) -> bool:
+        """A concept is learnable when every gating prerequisite is mastered (SOLID+)."""
+        for e in self._gating_prereqs(concept_id):
             st = self._states.get(e.src)
             if st is None or not is_mastered(st.mastery):
                 return False
@@ -425,9 +435,7 @@ class CurriculumApplicationService(CurriculumService):
             states_list, last_check.at if last_check else None, now
         )
         ripe = snapshot.ripeness(states_list, now)
-        prereq_in = {
-            c.id: self._edges.in_edges(c.id, EdgeType.PREREQUISITE) for c in concepts
-        }
+        prereq_in = {c.id: self._gating_prereqs(c.id) for c in concepts}
         near_unlocks = snapshot.unlock_proximity(concepts, states_map, prereq_in)
         unlocks_ready = sorted(
             c.id
@@ -495,9 +503,7 @@ class CurriculumApplicationService(CurriculumService):
         terms = self._focus_terms(focus)
         scoped = [c for c in self._concepts.list_by_course(course) if self._in_focus(c, terms)]
         states_map = {s.concept_id: s for s in self._states.all_for_course(course)}
-        prereq_in = {
-            c.id: self._edges.in_edges(c.id, EdgeType.PREREQUISITE) for c in scoped
-        }
+        prereq_in = {c.id: self._gating_prereqs(c.id) for c in scoped}
         near = snapshot.unlock_proximity(scoped, states_map, prereq_in)
         if near:
             row = min(near, key=lambda r: (not r["one_away"], r["missing"], r["concept_id"]))

@@ -56,8 +56,10 @@ class FullStackTests(unittest.TestCase):
                                source_refs=(SourceRef("lessons/cyber.md", 1),))
             )
 
-        # aes requires cia (prerequisite gate); cia relates-to confidentiality (skip target)
-        self.prereq = Edge(src="cyber/cia", dst="cyber/aes", type=EdgeType.PREREQUISITE)
+        # aes requires cia (prerequisite gate); cia relates-to confidentiality (skip target).
+        # The gate is spine-provenance: only human-vetted edges gate unlocking.
+        self.prereq = Edge(src="cyber/cia", dst="cyber/aes", type=EdgeType.PREREQUISITE,
+                           provenance="spine", confidence=1.0)
         self.related = Edge(src="cyber/cia", dst="cyber/confidentiality",
                             type=EdgeType.RELATED, importance=0.9)
         s.edges.upsert(self.prereq)
@@ -80,6 +82,38 @@ class FullStackTests(unittest.TestCase):
         self.assertIn("cyber/cia", ids)
         self.assertNotIn("cyber/aes", ids)  # prerequisite not yet mastered
         self.assertEqual(result.chosen.mode, NextMode.TEACH)
+
+    def _add_concept(self, cid: str, title: str) -> None:
+        self.stack.concepts.upsert(
+            Concept(id=cid, course=COURSE, title=title,
+                    source_refs=(SourceRef("lessons/cyber.md", 1),))
+        )
+        self.stack.content.put_concept_content(
+            ConceptContent(concept_id=cid, title=title, body=f"Body of {title}.",
+                           source_refs=(SourceRef("lessons/cyber.md", 1),))
+        )
+
+    def test_inferred_prerequisite_does_not_gate(self) -> None:
+        # An LLM-guessed prerequisite is a cross-link, not a hard gate: rsa
+        # must stay learnable even though its only prereq (inferred) is
+        # unmastered, otherwise inferred edges could close every entry point.
+        self._add_concept("cyber/rsa", "RSA")
+        self.stack.edges.upsert(
+            Edge(src="cyber/cia", dst="cyber/rsa",
+                 type=EdgeType.PREREQUISITE, provenance="inferred")
+        )
+        ids = {c.concept_id for c in self.stack.service.next_action(COURSE).candidates}
+        self.assertIn("cyber/rsa", ids)
+
+    def test_manual_prerequisite_gates(self) -> None:
+        # A hand-curated prerequisite is human-vetted like the spine: it gates.
+        self._add_concept("cyber/rsa", "RSA")
+        self.stack.edges.upsert(
+            Edge(src="cyber/cia", dst="cyber/rsa",
+                 type=EdgeType.PREREQUISITE, provenance="manual")
+        )
+        ids = {c.concept_id for c in self.stack.service.next_action(COURSE).candidates}
+        self.assertNotIn("cyber/rsa", ids)
 
     def test_explain_and_quiz_return_grounded_content(self) -> None:
         content = self.stack.service.explain("cyber/cia")

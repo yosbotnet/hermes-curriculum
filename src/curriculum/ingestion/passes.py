@@ -664,21 +664,19 @@ class InferEdgesPass(IngestionPass):
             for edge in ctx.edges
             if edge.provenance == "spine" and edge.type is EdgeType.PREREQUISITE
         }
-        # Concepts that already have at least one incoming spine PREREQUISITE.
-        # Those WITHOUT one are spine-heads — the entry points to the trusted
-        # chain. Inference must not create PREREQUISITE edges targeting a
-        # spine-head, because that would close every entry into the graph and
-        # leave nothing learnable from cold.
-        spine_dsts = {
-            edge.dst for edge in ctx.edges
-            if edge.provenance == "spine" and edge.type is EdgeType.PREREQUISITE
-        }
+        # Spine-heads: concepts ON the spine with no incoming spine
+        # PREREQUISITE -- the entry points of the trusted chain. Inference must
+        # not create PREREQUISITE edges targeting a head (that would close an
+        # entry into the graph). ONLY heads are protected: off-spine satellite
+        # concepts remain valid targets, because inferred prereqs into them are
+        # exactly the cross-links this pass exists to add.
+        spine_heads = {src for src, _ in spine_keys} - {dst for _, dst in spine_keys}
         # One call per batch of <=batch_size SOURCE concepts (the full id set is
         # supplied for valid endpoints). Bounding the output is what avoids the
         # JSON truncation that silently dropped ALL edges on high-concept decks.
         bs = self._batch_size
         for i in range(0, len(concepts), bs):
-            self._infer(ctx, concepts[i : i + bs], concepts, files, spine_keys, spine_dsts)
+            self._infer(ctx, concepts[i : i + bs], concepts, files, spine_keys, spine_heads)
 
     def _infer(
         self,
@@ -687,7 +685,7 @@ class InferEdgesPass(IngestionPass):
         all_concepts: Sequence[Concept],
         files: set[str],
         spine_keys: set[tuple[str, str]],
-        spine_dsts: set[str],
+        spine_heads: set[str],
     ) -> None:
         raw = self._llm.complete(
             self._prompt(focus, all_concepts, files),
@@ -700,11 +698,8 @@ class InferEdgesPass(IngestionPass):
                 continue
             if edge.type is EdgeType.PREREQUISITE and (edge.src, edge.dst) in spine_keys:
                 continue  # never overwrite a trusted spine edge with a guess
-            # Protect spine-head concepts: a PREREQUISITE edge targeting a
-            # concept that has no incoming spine prerequisite would close an
-            # entry point into the graph, leaving nothing learnable from cold.
-            if edge.type is EdgeType.PREREQUISITE and edge.dst not in spine_dsts:
-                continue
+            if edge.type is EdgeType.PREREQUISITE and edge.dst in spine_heads:
+                continue  # never close an entry point of the trusted chain
             ctx.edges.append(edge)
 
     def _prompt(

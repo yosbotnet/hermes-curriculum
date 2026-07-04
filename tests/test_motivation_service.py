@@ -63,7 +63,9 @@ class MotivationServiceTests(unittest.TestCase):
                                source_refs=(SourceRef("lessons/cyber.md", 1),))
             )
 
-        s.edges.upsert(Edge(src="cyber/cia", dst="cyber/aes", type=EdgeType.PREREQUISITE))
+        # Spine-provenance: only human-vetted edges gate unlocking.
+        s.edges.upsert(Edge(src="cyber/cia", dst="cyber/aes", type=EdgeType.PREREQUISITE,
+                            provenance="spine", confidence=1.0))
         s.edges.upsert(
             Edge(src="cyber/cia", dst="cyber/confidentiality",
                  type=EdgeType.ENCOMPASSES, weight=0.9)
@@ -139,6 +141,21 @@ class MotivationServiceTests(unittest.TestCase):
         self.assertIn("cyber/aes", after["unlocks_ready"])
         self.assertEqual(after["near_unlocks"], [])
         self.assertEqual(after["by_mastery"]["solid"], 1)
+
+    def test_inferred_prereq_neither_gates_nor_counts_as_near_unlock(self) -> None:
+        # confidentiality's only prereq is LLM-inferred: it must stay in
+        # unlocks_ready AND stay out of near_unlocks. The gate and the
+        # proximity report must agree on which edges gate, or checkin calls a
+        # concept simultaneously "ready" and "N prerequisites away".
+        self.stack.edges.upsert(
+            Edge(src="cyber/hashing", dst="cyber/confidentiality",
+                 type=EdgeType.PREREQUISITE, provenance="inferred")
+        )
+        out = self.stack.service.checkin(COURSE)
+        self.assertIn("cyber/confidentiality", out["unlocks_ready"])
+        self.assertEqual(
+            [row["concept_id"] for row in out["near_unlocks"]], ["cyber/aes"]
+        )
 
     # ------------------------------------------------------------- frontier
     def test_frontier_returns_three_distinct_buckets(self) -> None:

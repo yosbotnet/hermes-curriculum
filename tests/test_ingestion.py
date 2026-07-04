@@ -493,6 +493,37 @@ class InferEdgesPassTest(unittest.TestCase):
         self.assertIs(by_id[_RELAX_EDGE_ID].type, EdgeType.PREREQUISITE)
         self.assertEqual(by_id[_RELAX_EDGE_ID].importance, 0.8)
 
+    def test_protects_spine_head_but_keeps_satellite_prereqs(self) -> None:
+        # Spine chain relaxation -> dijkstra: relaxation is the head (entry
+        # point), dijkstra a downstream spine concept, priority-queue an
+        # off-spine satellite. Inference must drop a PREREQUISITE targeting the
+        # head (it would close the graph's entry) but keep one targeting a
+        # satellite: those are the useful cross-links inference exists to add.
+        ctx = self._ctx()
+        ctx.edges.append(
+            Edge(
+                src="algo101/relaxation",
+                dst="algo101/dijkstra",
+                type=EdgeType.PREREQUISITE,
+                provenance="spine",
+                confidence=1.0,
+            )
+        )
+        payload = json.dumps(
+            {
+                "edges": [
+                    {"src": "algo101/priority-queue", "dst": "algo101/relaxation",
+                     "type": "prerequisite", "source_ref": {"file": "f.md"}},
+                    {"src": "algo101/dijkstra", "dst": "algo101/priority-queue",
+                     "type": "prerequisite", "source_ref": {"file": "f.md"}},
+                ]
+            }
+        )
+        InferEdgesPass(FakeLlm({"Infer edges for the following concepts": payload})).run(ctx)
+        inferred = {(e.src, e.dst) for e in ctx.edges if e.provenance == "inferred"}
+        self.assertNotIn(("algo101/priority-queue", "algo101/relaxation"), inferred)
+        self.assertIn(("algo101/dijkstra", "algo101/priority-queue"), inferred)
+
     def test_skips_unknown_type_and_self_loop(self) -> None:
         payload = json.dumps(
             {
