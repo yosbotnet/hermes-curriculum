@@ -24,3 +24,5 @@ logs/
 # Local dev/one-off scripts (superseded by the CLI; kept local, not published).
 scripts/
 .claude/
+corpus-gpu.json
+materials/pmpp-*
