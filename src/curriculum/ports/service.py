@@ -79,3 +79,10 @@ class CurriculumService(ABC):
         """Retire a question so it is never served again (the kill switch),
         logging an "item_flag" engagement event with the reason. Returns
         ``{"question_id", "status": "retired"}``."""
+
+    @abstractmethod
+    def list_courses(self) -> list[str]:
+        """Return every distinct course in the engine, sorted.
+
+        The discovery call: a tutor learns which courses exist in the graph
+        without a hard-coded list, so a newly ingested course is visible."""

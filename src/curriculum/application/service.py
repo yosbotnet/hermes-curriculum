@@ -540,3 +540,13 @@ class CurriculumApplicationService(CurriculumService):
             {"question_id": question_id, "concept_id": question.concept_id, "reason": reason},
         )
         return {"question_id": question_id, "status": "retired"}
+
+    def list_courses(self) -> list[str]:
+        """Return every distinct course name known to the engine, sorted.
+
+        This is the discovery call: a tutor or agent calls it on startup to
+        learn which courses exist in the graph without needing a hard-coded
+        list, so a newly ingested course (e.g. GPUKernelOptimization) is
+        visible immediately.
+        """
+        return list(self._concepts.list_courses())

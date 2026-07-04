@@ -277,6 +277,12 @@ class PostgresConceptIndexRepository(_PgRepo, ConceptIndexRepository):
         )
         return [_row_to_concept(r) for r in cur.fetchall()]
 
+    def list_courses(self) -> Sequence[str]:
+        cur = self._conn.execute(
+            "SELECT DISTINCT course FROM concept ORDER BY course"
+        )
+        return [row[0] for row in cur.fetchall()]
+
     def upsert(self, concept: Concept) -> None:
         # The update list deliberately omits ``embedding``: it is a derived cache
         # refreshed by set_embedding, and an upsert of metadata must not wipe it.

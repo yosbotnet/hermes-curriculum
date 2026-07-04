@@ -69,6 +69,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "quiz",
     "grade",
     "state",
+    "courses",
     "checkin",
     "frontier",
     "flag_question",
@@ -317,6 +318,13 @@ def build_server(service: CurriculumService) -> Any:
     )
     def state_tool(course: str):  # noqa: ANN202
         return _call_state(service, course)
+
+    @server.tool(
+        name="courses",
+        description="List all courses available in the curriculum engine.",
+    )
+    def courses_tool():  # noqa: ANN202
+        return {"courses": service.list_courses()}
 
     @server.tool(
         name="checkin",

@@ -36,6 +36,10 @@ class ConceptIndexRepository(ABC):
     def list_by_course(self, course: str) -> Sequence[Concept]: ...
 
     @abstractmethod
+    def list_courses(self) -> Sequence[str]:
+        """Return every distinct course name known to this repository, sorted."""
+
+    @abstractmethod
     def upsert(self, concept: Concept) -> None: ...
 
     @abstractmethod

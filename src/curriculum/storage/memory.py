@@ -103,6 +103,9 @@ class InMemoryConceptIndexRepository(ConceptIndexRepository):
         # Sorted by id for deterministic iteration order across runs.
         return [c for _, c in sorted(self._concepts.items()) if c.course == course]
 
+    def list_courses(self) -> Sequence[str]:
+        return sorted({c.course for c in self._concepts.values()})
+
     def upsert(self, concept: Concept) -> None:
         self._concepts[concept.id] = concept
 

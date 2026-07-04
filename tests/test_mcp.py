@@ -165,6 +165,10 @@ class _StubService(CurriculumService):
         self.calls.append(("flag_question", question_id, reason))
         return {"question_id": question_id, "status": "retired"}
 
+    def list_courses(self) -> list[str]:
+        self.calls.append(("list_courses",))
+        return ["Cyber", "Physics"]
+
 
 def _payload(raw):
     """Extract the JSON dict from whatever ``FastMCP.call_tool`` returned.
@@ -195,7 +199,7 @@ class ImportContractTest(unittest.TestCase):
         self.assertTrue(hasattr(server, "mcp"))  # None when the SDK is absent
         self.assertEqual(
             server.TOOL_NAMES,
-            ("next", "explain", "quiz", "grade", "state", "checkin", "frontier", "flag_question"),
+            ("next", "explain", "quiz", "grade", "state", "courses", "checkin", "frontier", "flag_question"),
         )
 
 
@@ -355,7 +359,7 @@ class McpServerTest(unittest.TestCase):
     def test_build_server_returns_an_object(self) -> None:
         self.assertIsNotNone(self.server)
 
-    def test_all_five_tools_registered(self) -> None:
+    def test_all_nine_tools_registered(self) -> None:
         tools = asyncio.run(self.server.list_tools())
         self.assertEqual({t.name for t in tools}, set(server.TOOL_NAMES))
 
