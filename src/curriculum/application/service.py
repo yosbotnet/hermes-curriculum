@@ -129,8 +129,17 @@ class CurriculumApplicationService(CurriculumService):
         return state is None or state.stability is None
 
     def _prereqs_satisfied(self, concept_id: str) -> bool:
-        """A concept is learnable when every prerequisite is mastered (SOLID+)."""
+        """A concept is learnable when every SPINE prerequisite is mastered (SOLID+).
+
+        Only human-vetted spine edges (confidence=1.0) gate the unlock, not
+        LLM-inferred ones. Inferred prerequisites are useful cross-links for
+        connection-based questioning, but trusting them as hard gates can close
+        all entry points into a densely connected graph — a single inferred edge
+        targeting every spine-head concept leaves nothing learnable from cold.
+        """
         for e in self._edges.in_edges(concept_id, EdgeType.PREREQUISITE):
+            if e.provenance != "spine":
+                continue
             st = self._states.get(e.src)
             if st is None or not is_mastered(st.mastery):
                 return False
