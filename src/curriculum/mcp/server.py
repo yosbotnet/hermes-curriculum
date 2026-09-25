@@ -50,6 +50,7 @@ except ImportError:  # pragma: no cover - the import-without-SDK path
 
 __all__ = [
     "TOOL_NAMES",
+    "LEARNER_TOOL_NAMES",
     "build_server",
     "main",
     "next_result_to_dict",
@@ -73,6 +74,18 @@ TOOL_NAMES: tuple[str, ...] = (
     "checkin",
     "frontier",
     "flag_question",
+)
+
+# Dialogue mode (the learner model). Registered only when a learner service is
+# wired in, so the concept-graph server still works on a database without
+# schema/003.
+LEARNER_TOOL_NAMES: tuple[str, ...] = (
+    "recall",
+    "remember",
+    "resolve",
+    "reviews",
+    "review_result",
+    "flag_material",
 )
 
 
@@ -234,10 +247,153 @@ def _call_flag_question(
     return dict(service.flag_question(question_id, reason=reason))
 
 
+# Dialogue-mode routers: the learner model's payloads are already JSON-able
+# mappings, so each router only coerces the outer Mapping to a dict.
+def _call_recall(learner, course: str, topic: str | None = None) -> dict[str, Any]:
+    return dict(learner.recall(course, topic=topic))
+
+
+def _call_remember(
+    learner,
+    *,
+    kind: str,
+    course: str,
+    text: str,
+    topic: str = "",
+    learner_words: str | None = None,
+    source_file: str | None = None,
+    source_line: int | None = None,
+) -> dict[str, Any]:
+    return dict(learner.remember(kind=kind, course=course, text=text, topic=topic,
+                                 learner_words=learner_words, source_file=source_file,
+                                 source_line=source_line))
+
+
+def _call_resolve(learner, note_id: str, resolution: str | None = None) -> dict[str, Any]:
+    return dict(learner.resolve(note_id, resolution=resolution))
+
+
+def _call_reviews(learner, course: str, limit: int = 2) -> dict[str, Any]:
+    return dict(learner.reviews(course, limit=limit))
+
+
+def _call_review_result(learner, note_id: str, outcome: str) -> dict[str, Any]:
+    return dict(learner.review_result(note_id, outcome))
+
+
+def _call_flag_material(
+    learner, *, course: str, source_file: str, what_was_unclear: str,
+    source_line: int | None = None, topic: str = "",
+) -> dict[str, Any]:
+    return dict(learner.flag_material(course=course, source_file=source_file,
+                                      what_was_unclear=what_was_unclear,
+                                      source_line=source_line, topic=topic))
+
+
+def _register_learner_tools(server: Any, learner) -> None:
+    """Register the six dialogue-mode tools. The descriptions carry the tutor
+    contract's rules, because they are what the host model reads."""
+
+    @server.tool(
+        name="recall",
+        description=(
+            "Dialogue mode. Call at the START of a tutoring session (and when a "
+            "topic comes back): returns the learner's goals, open threads, and "
+            "the insights and fixed misconceptions they built, newest first, in "
+            "their own words where recorded. Optional 'topic' filters by "
+            "substring. Open the session with at most three sentences from it."
+        ),
+    )
+    def recall_tool(course: str, topic: str | None = None):  # noqa: ANN202
+        return _call_recall(learner, course, topic)
+
+    @server.tool(
+        name="remember",
+        description=(
+            "Dialogue mode. Record something about the learner THE MOMENT it "
+            "happens. kind: 'insight' (a frame they built or adopted; put their "
+            "exact phrasing in learner_words), 'misconception_fixed' (the wrong "
+            "link you diagnosed and corrected, stated as what they believed), "
+            "'open_thread' (a question they raised that you did not finish), "
+            "'goal' (what the learning is for), 'material_gap' (prefer "
+            "flag_material). text: one line in your words. Idempotent: the same "
+            "kind and text are not duplicated. Insights and fixed misconceptions "
+            "are scheduled for review automatically."
+        ),
+    )
+    def remember_tool(  # noqa: ANN202
+        kind: str,
+        course: str,
+        text: str,
+        topic: str = "",
+        learner_words: str | None = None,
+        source_file: str | None = None,
+        source_line: int | None = None,
+    ):
+        return _call_remember(learner, kind=kind, course=course, text=text, topic=topic,
+                              learner_words=learner_words, source_file=source_file,
+                              source_line=source_line)
+
+    @server.tool(
+        name="resolve",
+        description=(
+            "Dialogue mode. Close a note, typically an open_thread that has now "
+            "been answered; an optional 'resolution' line is kept with it."
+        ),
+    )
+    def resolve_tool(note_id: str, resolution: str | None = None):  # noqa: ANN202
+        return _call_resolve(learner, note_id, resolution)
+
+    @server.tool(
+        name="reviews",
+        description=(
+            "Dialogue mode. Call at the start of a session: returns up to 'limit' "
+            "(default 2) of the learner's own insights or fixed misconceptions "
+            "that are ripe, most at risk first. NEVER restate them or ask for a "
+            "definition: pose ONE new case where the frame decides the answer, "
+            "in the learner's words, withhold the answer until they try, then "
+            "call review_result."
+        ),
+    )
+    def reviews_tool(course: str, limit: int = 2):  # noqa: ANN202
+        return _call_reviews(learner, course, limit)
+
+    @server.tool(
+        name="review_result",
+        description=(
+            "Dialogue mode. Record how a review went: 'forgot' (could not apply "
+            "the frame), 'struggled' (got there with hints), 'applied' (applied it "
+            "unaided) or 'easy' (immediately, and extended it). Returns when it "
+            "comes back."
+        ),
+    )
+    def review_result_tool(note_id: str, outcome: str):  # noqa: ANN202
+        return _call_review_result(learner, note_id, outcome)
+
+    @server.tool(
+        name="flag_material",
+        description=(
+            "Dialogue mode. The course notes failed the learner here (skipped a "
+            "step, used a term before defining it, stated something unclearly): "
+            "record where and what, so the notes can be fixed later."
+        ),
+    )
+    def flag_material_tool(  # noqa: ANN202
+        course: str,
+        source_file: str,
+        what_was_unclear: str,
+        source_line: int | None = None,
+        topic: str = "",
+    ):
+        return _call_flag_material(learner, course=course, source_file=source_file,
+                                   what_was_unclear=what_was_unclear,
+                                   source_line=source_line, topic=topic)
+
+
 # --------------------------------------------------------------------------- #
 # MCP wiring (the only part that touches the SDK).
 # --------------------------------------------------------------------------- #
-def build_server(service: CurriculumService) -> Any:
+def build_server(service: CurriculumService, learner=None) -> Any:
     """Build a FastMCP server exposing ``service`` as the eight curriculum tools.
 
     Each registered handler is a thin closure over ``service`` that defers to a
@@ -364,6 +520,8 @@ def build_server(service: CurriculumService) -> Any:
     def flag_question_tool(question_id: str, reason: str = ""):  # noqa: ANN202
         return _call_flag_question(service, question_id, reason)
 
+    if learner is not None:
+        _register_learner_tools(server, learner)
     return server
 
 
@@ -400,7 +558,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     service = build_service(settings)
-    server = build_server(service)
+    # Dialogue mode is optional: a database without schema/003 still serves the
+    # concept-graph tools, and says why the learner tools are missing.
+    learner = None
+    try:
+        from curriculum.application.composition import build_learner_service
+
+        learner = build_learner_service(settings)
+        learner.list_courses()  # probe: fails fast if learner_note does not exist
+    except Exception as exc:  # noqa: BLE001 - report and serve without dialogue mode
+        print(f"dialogue-mode tools disabled: {exc} (run 'curriculum db-migrate')", file=sys.stderr)
+        learner = None
+    server = build_server(service, learner)
     # FastMCP.run() defaults to the stdio transport (mcp.server.stdio): it owns
     # the event loop and the read/write streams for the lifetime of the process.
     server.run()

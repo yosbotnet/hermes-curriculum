@@ -37,11 +37,13 @@ from ..domain.entities import (
     SourceRef,
 )
 from ..domain.enums import EdgeType, FsrsRating, Mastery
+from ..domain.learner import LearnerNote, NoteKind
 from ..domain.telemetry import EngagementEvent
 from ..ports.repositories import (
     ConceptIndexRepository,
     CourseProfileRepository,
     EdgeRepository,
+    LearnerNoteRepository,
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
@@ -70,6 +72,7 @@ __all__ = [
     "PostgresLearnerStateRepository",
     "PostgresReviewLogRepository",
     "PostgresTelemetryRepository",
+    "PostgresLearnerNoteRepository",
     "PostgresCourseProfileRepository",
     "connect",
 ]
@@ -244,6 +247,34 @@ def _row_to_profile(row: tuple) -> CourseProfile:
         target_retention=row[4],
         exam_date=row[5],
         confirmed_by_user=row[6],
+    )
+
+
+_NOTE_COLS = (
+    "id, course, topic, kind, text, learner_words, source_ref, created_at, status, "
+    "resolved_at, stability, difficulty, last_review, due_at, reps, lapses"
+)
+
+
+def _row_to_note(row: tuple) -> LearnerNote:
+    ref = row[6]
+    return LearnerNote(
+        id=row[0],
+        course=row[1],
+        topic=row[2],
+        kind=NoteKind(row[3]),
+        text=row[4],
+        learner_words=row[5],
+        source_ref=SourceRef(ref["file"], ref.get("line")) if ref else None,
+        created_at=row[7],
+        status=row[8],
+        resolved_at=row[9],
+        stability=row[10],
+        difficulty=row[11],
+        last_review=row[12],
+        due_at=row[13],
+        reps=row[14],
+        lapses=row[15],
     )
 
 
@@ -714,6 +745,68 @@ class PostgresTelemetryRepository(_PgRepo, TelemetryRepository):
         return [_row_to_engagement(r) for r in cur.fetchall()]
 
 
+class PostgresLearnerNoteRepository(_PgRepo, LearnerNoteRepository):
+    """The learner model, backed by ``learner_note`` (schema/003). Orderings match
+    the in-memory specification: oldest first with id as the tie-break."""
+
+    def get(self, note_id: str) -> LearnerNote | None:
+        cur = self._conn.execute(f"SELECT {_NOTE_COLS} FROM learner_note WHERE id = %s", (note_id,))
+        row = cur.fetchone()
+        return _row_to_note(row) if row is not None else None
+
+    def upsert(self, note: LearnerNote) -> None:
+        ref = None if note.source_ref is None else Jsonb({"file": note.source_ref.file, "line": note.source_ref.line})
+        self._conn.execute(
+            f"""
+            INSERT INTO learner_note ({_NOTE_COLS})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                course = EXCLUDED.course, topic = EXCLUDED.topic, kind = EXCLUDED.kind,
+                text = EXCLUDED.text, learner_words = EXCLUDED.learner_words,
+                source_ref = EXCLUDED.source_ref, created_at = EXCLUDED.created_at,
+                status = EXCLUDED.status, resolved_at = EXCLUDED.resolved_at,
+                stability = EXCLUDED.stability, difficulty = EXCLUDED.difficulty,
+                last_review = EXCLUDED.last_review, due_at = EXCLUDED.due_at,
+                reps = EXCLUDED.reps, lapses = EXCLUDED.lapses
+            """,
+            (
+                note.id, note.course, note.topic, note.kind.value, note.text,
+                note.learner_words, ref, note.created_at, note.status, note.resolved_at,
+                note.stability, note.difficulty, note.last_review, note.due_at,
+                note.reps, note.lapses,
+            ),
+        )
+
+    def list(self, course, *, kinds=None, status=None) -> Sequence[LearnerNote]:
+        sql = f"SELECT {_NOTE_COLS} FROM learner_note WHERE course = %s"
+        params: list = [course]
+        if kinds is not None:
+            sql += " AND kind = ANY(%s)"
+            params.append([k.value for k in kinds])
+        if status is not None:
+            sql += " AND status = %s"
+            params.append(status)
+        sql += " ORDER BY created_at, id"
+        return [_row_to_note(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def due(self, course: str, before: datetime) -> Sequence[LearnerNote]:
+        cur = self._conn.execute(
+            f"""
+            SELECT {_NOTE_COLS} FROM learner_note
+            WHERE course = %s AND status = 'active'
+              AND kind IN ('insight', 'misconception_fixed')
+              AND due_at IS NOT NULL AND due_at <= %s
+            ORDER BY due_at, id
+            """,
+            (course, before),
+        )
+        return [_row_to_note(r) for r in cur.fetchall()]
+
+    def list_courses(self) -> Sequence[str]:
+        cur = self._conn.execute("SELECT DISTINCT course FROM learner_note ORDER BY course")
+        return [r[0] for r in cur.fetchall()]
+
+
 class PostgresCourseProfileRepository(_PgRepo, CourseProfileRepository):
     """The one frozen profile per course, backed by ``course_profile``."""
 
@@ -772,6 +865,7 @@ class PostgresRepositories:
         self.learner_state = PostgresLearnerStateRepository(conn)
         self.review_log = PostgresReviewLogRepository(conn)
         self.telemetry = PostgresTelemetryRepository(conn)
+        self.learner_notes = PostgresLearnerNoteRepository(conn)
         self.profiles = PostgresCourseProfileRepository(conn)
 
 

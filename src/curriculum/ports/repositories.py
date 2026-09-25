@@ -23,6 +23,7 @@ from ..domain.entities import (
     ReviewEvent,
 )
 from ..domain.enums import EdgeType
+from ..domain.learner import LearnerNote, NoteKind
 from ..domain.telemetry import EngagementEvent
 
 
@@ -154,6 +155,38 @@ class TelemetryRepository(ABC):
 
     @abstractmethod
     def list_by_course(self, course: str) -> Sequence[EngagementEvent]: ...
+
+
+class LearnerNoteRepository(ABC):
+    """The learner model (dialogue mode): insights, fixed misconceptions, open
+    threads, material gaps and goals, with FSRS state on the reviewable ones.
+    Postgres is authoritative (``learner_note``)."""
+
+    @abstractmethod
+    def get(self, note_id: str) -> LearnerNote | None: ...
+
+    @abstractmethod
+    def upsert(self, note: LearnerNote) -> None: ...
+
+    @abstractmethod
+    def list(
+        self,
+        course: str,
+        *,
+        kinds: Sequence[NoteKind] | None = None,
+        status: str | None = None,
+    ) -> Sequence[LearnerNote]:
+        """Notes for a course, oldest first (by ``created_at``, then id), filtered
+        by kind and status when given."""
+
+    @abstractmethod
+    def due(self, course: str, before: datetime) -> Sequence[LearnerNote]:
+        """Active reviewable notes (insight / misconception_fixed) whose
+        ``due_at`` is at or before ``before``."""
+
+    @abstractmethod
+    def list_courses(self) -> Sequence[str]:
+        """Every course that has at least one note, sorted."""
 
 
 class CourseProfileRepository(ABC):

@@ -6,7 +6,8 @@ order**, so a tutor LLM never has to make curriculum decisions mid-session. You 
 it at your own plain-text course materials; it ingests them into a concept/edge graph
 (Postgres + pgvector for structure/state, an OKF markdown bundle for prose), links the
 isolated concepts, generates grounded exam questions, and serves the result to a host
-(Hermes) over an MCP server exposing `next` / `explain` / `quiz` / `grade` / `state`.
+(Hermes) over an MCP server exposing `next` / `explain` / `quiz` / `grade` / `state`, plus the
+dialogue-mode learner model (`recall` / `remember` / `reviews` / ...).
 Everything here is generic: **no source materials and no secrets are committed** -- you
 supply both at runtime through `corpus.json` and the `CURRICULUM_API_KEY` environment
 variable.
@@ -224,6 +225,20 @@ persisted graph.
   propagation, update skip counts, log calibration; returns the new schedule.
 - `state(course)` -- a burndown / progress snapshot for the course.
 
+**Dialogue mode: the learner model** (see `docs/tutor-contract.md`). The concept graph
+models the material; the learner model records what the tutor learns about the learner,
+written during a conversation and read back at the start of the next one. Six more tools,
+registered when schema/003 is applied (`curriculum db-migrate`):
+- `recall(course, topic?)` -- goals, open threads, insights and fixed misconceptions, newest
+  first, in the learner's own words where recorded.
+- `remember(kind, course, text, topic?, learner_words?, source_file?, source_line?)` --
+  kinds `insight`, `misconception_fixed`, `open_thread`, `material_gap`, `goal`; idempotent;
+  insights and fixed misconceptions are scheduled for review with the FSRS scheduler.
+- `reviews(course, limit?)` -- ripe insights/misconceptions, most at risk first, with the
+  instruction to pose a NEW case rather than restate them.
+- `review_result(note_id, outcome)` -- forgot / struggled / applied / easy.
+- `resolve(note_id, resolution?)` and `flag_material(course, source_file, what_was_unclear, ...)`.
+
 ## Reset
 
 To start a course over (wipe the graph + all learner state and the generated content):
@@ -232,7 +247,8 @@ docker compose exec -T db psql -U curriculum -d curriculum \
   -c 'TRUNCATE concept, edge, question, learner_state, review_log, course_profile CASCADE;'
 rm -rf bundle      # or whatever CURRICULUM_OKF_PATH points at
 ```
-`make reset` does both. The database container and its volume stay up; only the rows and
+`make reset` does both. It deliberately does NOT touch `learner_note`: the learner model
+describes the person, not a build, and survives rebuilding a course. The database container and its volume stay up; only the rows and
 the OKF bundle are removed, so the next `curriculum build` starts clean.
 
 ## Troubleshooting
@@ -276,6 +292,9 @@ the OKF bundle are removed, so the next `curriculum build` starts clean.
 | `curriculum status [--course C]`| Read-only graph counts for a course. |
 | `curriculum serve`              | Become the stdio MCP server (Hermes launches this). |
 | `curriculum mcp-register`       | Register the MCP server with Hermes (or print the command). |
+| `curriculum db-migrate`         | Apply every `schema/*.sql` in order (idempotent); how an existing DB gets new tables. |
+| `curriculum notes [--course C] [--all] [--json]` | Show the learner model (dialogue mode). |
+| `curriculum remember <kind> <text> [--course C] [--topic T] [--words W] [--source F:L]` | Add one note to the learner model. |
 
 Tests need neither the database nor a key: `make test` (or
 `PYTHONPATH=src python3 -m unittest discover -s tests -t .`).

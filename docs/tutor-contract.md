@@ -1,6 +1,8 @@
 # Tutor contract: dialogue mode (DRAFT)
 
-Status: draft for review, 2026-09-25. Nothing here is implemented yet.
+Status: implemented 2026-09-25 (sections 4-7): schema/003, `application/learner_model.py`, six
+MCP tools, CLI `notes` / `remember` / `db-migrate`, and the prompt block as "Dialogue mode" in
+the Hermes tutor skill. Section 8 is the experiment still to run.
 
 This is the contract for how Hermes teaches when the learner is *learning* something,
 as opposed to drilling for an exam (the existing tutor skill's drill and exam modes stay
@@ -161,8 +163,8 @@ Reply in the learner's language. Be short. No emojis. No scores.
 
 Before writing any engine code:
 
-1. Implement only `remember` and `recall` (plus the table), and add this block as a
-   "dialogue mode" in the tutor skill.
+1. Done: all six tools, the table, and this block as "Dialogue mode" in the tutor skill (the
+   learner model was seeded with the real 2026-09-25 GPU session).
 2. Session 1: one PCD topic the learner needs for the oral (for example monitors or the
    event loop), grounded in the rewritten chapter and the PCD question bank.
 3. Session 2, three or four days later: does Hermes open with the learner's own insight

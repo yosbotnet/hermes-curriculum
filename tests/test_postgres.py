@@ -16,6 +16,8 @@ Two layers:
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import replace
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -59,6 +61,9 @@ _SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "001_init.sql"
 # The motivation layer's DDL (question.status, edge.provenance/confidence,
 # engagement_log) lives in a second migration applied on top of the base schema.
 _SCHEMA2 = Path(__file__).resolve().parents[1] / "schema" / "002_motivation.sql"
+# The embedding column is vector(N) with N from the schema (3072 for gemini-embedding-2);
+# live vectors must match it exactly.
+_DIM = int(re.search(r"embedding\s+vector\((\d+)\)", _SCHEMA.read_text()).group(1))
 _LIVE = psycopg is not None and bool(os.environ.get("CURRICULUM_PG_TEST"))
 
 
@@ -222,12 +227,12 @@ class PostgresLiveTest(unittest.TestCase):
     def test_upsert_preserves_embedding(self) -> None:
         c = self._concept("a")
         self.repos.concepts.upsert(c)
-        self.repos.concepts.set_embedding(c.id, [1.0] + [0.0] * 1023)
+        self.repos.concepts.set_embedding(c.id, [1.0] + [0.0] * (_DIM - 1))
         # A metadata re-upsert must not wipe the derived embedding.
         self.repos.concepts.upsert(self.repos.concepts.get(c.id))
         self.conn.commit()
         nearest = self.repos.concepts.nearest(
-            [1.0] + [0.0] * 1023, course=self.course, k=1
+            [1.0] + [0.0] * (_DIM - 1), course=self.course, k=1
         )
         self.assertEqual(nearest[0][0], c.id)
 
@@ -236,9 +241,9 @@ class PostgresLiveTest(unittest.TestCase):
         far = self._concept("far")
         self.repos.concepts.upsert(near)
         self.repos.concepts.upsert(far)
-        query = [1.0] + [0.0] * 1023
+        query = [1.0] + [0.0] * (_DIM - 1)
         self.repos.concepts.set_embedding(near.id, query)            # distance 0
-        self.repos.concepts.set_embedding(far.id, [0.0, 1.0] + [0.0] * 1022)  # distance sqrt(2)
+        self.repos.concepts.set_embedding(far.id, [0.0, 1.0] + [0.0] * (_DIM - 2))  # distance sqrt(2)
         self.conn.commit()
         result = self.repos.concepts.nearest(query, course=self.course, k=2)
         self.assertEqual([cid for cid, _ in result], [near.id, far.id])
@@ -248,10 +253,10 @@ class PostgresLiveTest(unittest.TestCase):
     def test_nearest_non_positive_k_is_empty(self) -> None:
         c = self._concept("a")
         self.repos.concepts.upsert(c)
-        self.repos.concepts.set_embedding(c.id, [1.0] + [0.0] * 1023)
+        self.repos.concepts.set_embedding(c.id, [1.0] + [0.0] * (_DIM - 1))
         self.conn.commit()
         self.assertEqual(
-            self.repos.concepts.nearest([1.0] + [0.0] * 1023, course=self.course, k=0),
+            self.repos.concepts.nearest([1.0] + [0.0] * (_DIM - 1), course=self.course, k=0),
             [],
         )
 
@@ -489,6 +494,64 @@ class PostgresLiveTest(unittest.TestCase):
         # profile has no FK to concept; clean it explicitly.
         self.conn.execute("DELETE FROM course_profile WHERE course = %s", (self.course,))
         self.conn.commit()
+
+
+_SCHEMA3 = Path(__file__).resolve().parents[1] / "schema" / "003_learner_model.sql"
+
+
+@unittest.skipUnless(_LIVE, "needs psycopg + Postgres (set CURRICULUM_PG_TEST and CURRICULUM_DB_URL)")
+class PostgresLearnerNoteLiveTest(unittest.TestCase):
+    """The learner_note adapter must behave like the in-memory specification."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from curriculum.domain.learner import LearnerNote, NoteKind
+
+        cls.LearnerNote, cls.NoteKind = LearnerNote, NoteKind
+        cls.conn = connect(os.environ["CURRICULUM_DB_URL"])
+        cls.conn.execute(_SCHEMA3.read_text())   # idempotent
+        cls.repos = PostgresRepositories(cls.conn)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.conn.close()
+
+    def setUp(self) -> None:
+        self.course = "pgnotes_" + uuid.uuid4().hex[:12]
+        self.now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+
+    def tearDown(self) -> None:
+        self.conn.execute("DELETE FROM learner_note WHERE course = %s", (self.course,))
+
+    def _note(self, nid: str, kind, **kw):
+        return self.LearnerNote(id=f"{self.course}:{nid}", course=self.course, kind=kind, text=nid,
+                                created_at=kw.pop("created_at", self.now), **kw)
+
+    def test_round_trip_every_field(self) -> None:
+        note = self._note("a", self.NoteKind.INSIGHT, topic="coalescing", learner_words="fixed vs mobile",
+                          source_ref=SourceRef("play/gpu/level-1.html", 12), stability=3.17, difficulty=5.3,
+                          last_review=self.now, due_at=self.now + timedelta(days=3), reps=2, lapses=1)
+        repo = self.repos.learner_notes
+        repo.upsert(note)
+        got = repo.get(note.id)
+        self.assertEqual((got.topic, got.learner_words, got.source_ref, got.reps, got.lapses),
+                         ("coalescing", "fixed vs mobile", SourceRef("play/gpu/level-1.html", 12), 2, 1))
+        self.assertAlmostEqual(got.stability, 3.17, places=4)
+        self.assertEqual(got.due_at, note.due_at)
+        repo.upsert(replace(note, status="resolved", resolved_at=self.now))
+        self.assertEqual(repo.get(note.id).status, "resolved")
+
+    def test_list_due_and_courses_match_the_specification(self) -> None:
+        repo, N = self.repos.learner_notes, self.NoteKind
+        repo.upsert(self._note("b", N.INSIGHT, due_at=self.now + timedelta(days=1)))
+        repo.upsert(self._note("a", N.INSIGHT, due_at=self.now - timedelta(days=1)))
+        repo.upsert(self._note("c", N.OPEN_THREAD, created_at=self.now - timedelta(hours=1)))
+        repo.upsert(self._note("d", N.MISCONCEPTION_FIXED, due_at=self.now - timedelta(days=2), status="resolved"))
+        ids = lambda notes: [n.id.split(":")[1] for n in notes]
+        self.assertEqual(ids(repo.list(self.course)), ["c", "a", "b", "d"])
+        self.assertEqual(ids(repo.list(self.course, kinds=[N.INSIGHT], status="active")), ["a", "b"])
+        self.assertEqual(ids(repo.due(self.course, self.now)), ["a"])
+        self.assertIn(self.course, repo.list_courses())
 
 
 if __name__ == "__main__":

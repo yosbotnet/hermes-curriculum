@@ -298,6 +298,82 @@ def _cmd_flag_question(args: argparse.Namespace, settings: Settings) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Dialogue mode: the learner model (see docs/tutor-contract.md).
+# --------------------------------------------------------------------------- #
+_SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schema"
+
+
+def _cmd_db_migrate(args: argparse.Namespace, settings: Settings) -> int:
+    """Apply every schema/*.sql file in order. The files are idempotent
+    (IF NOT EXISTS), so this is safe to run on a live database at any time; it is
+    how a database created before a new schema file picks it up."""
+    from .storage.postgres import connect
+
+    files = sorted(_SCHEMA_DIR.glob("*.sql"))
+    if not files:
+        print(f"no schema files found in {_SCHEMA_DIR}", file=sys.stderr)
+        return 1
+    conn = connect(settings.database_url)
+    try:
+        for f in files:
+            conn.execute(f.read_text())
+            print(f"applied {f.name}")
+    finally:
+        conn.close()
+    return 0
+
+
+def _render_notes(notes: list) -> str:
+    """One line per note, grouped by kind, for a human reading the model."""
+    if not notes:
+        return "(no notes)"
+    lines: list[str] = []
+    for kind in ("goal", "insight", "misconception_fixed", "open_thread", "material_gap"):
+        group = [n for n in notes if n["kind"] == kind]
+        if not group:
+            continue
+        lines.append(f"{kind} ({len(group)})")
+        for n in group:
+            topic = f"[{n['topic']}] " if n["topic"] else ""
+            words = f'  "{n["learner_words"]}"' if n.get("learner_words") else ""
+            due = f"  (review in {n['due_in_days']} d)" if n.get("due_in_days") is not None else ""
+            lines.append(f"  {n['id']}  {topic}{n['text']}{words}{due}")
+    return "\n".join(lines)
+
+
+def _cmd_notes(args: argparse.Namespace, settings: Settings) -> int:
+    """Show the learner model for a course (or every course that has notes)."""
+    from .application.composition import build_learner_service
+
+    learner = build_learner_service(settings)
+    courses = [args.course] if args.course else learner.list_courses()
+    status = None if args.all else "active"
+    if args.json:
+        _emit({c: list(learner.notes(c, status=status)) for c in courses})
+        return 0
+    for c in courses:
+        print(f"== {c}")
+        print(_render_notes(list(learner.notes(c, status=status))))
+    return 0
+
+
+def _cmd_remember(args: argparse.Namespace, settings: Settings) -> int:
+    """Add one note to the learner model from the shell (the same use-case the
+    tutor's remember tool calls)."""
+    from .application.composition import build_learner_service
+
+    learner = build_learner_service(settings)
+    source_file, source_line = None, None
+    if args.source:
+        source_file, _, line = args.source.partition(":")
+        source_line = int(line) if line.isdigit() else None
+    _emit(learner.remember(kind=args.kind, course=_course(args, settings), text=args.text,
+                           topic=args.topic, learner_words=args.words,
+                           source_file=source_file, source_line=source_line))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Corpus-preparation handlers (onboarding: raw materials -> buildable corpus).
 # Each lazy-imports curriculum.app.corpus_tools, keeping --help/doctor light.
 # --------------------------------------------------------------------------- #
@@ -651,6 +727,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reason", default="", help="optional reason for the flag"
     )
     p_flag_question.set_defaults(func=_cmd_flag_question)
+
+    p_migrate = sub.add_parser("db-migrate", help="apply schema/*.sql (idempotent)")
+    p_migrate.set_defaults(func=_cmd_db_migrate)
+
+    p_notes = sub.add_parser(
+        "notes", help="show the learner model (dialogue mode)"
+    )
+    p_notes.add_argument("--course", default=None, help="one course (default: every course with notes)")
+    p_notes.add_argument("--all", action="store_true", help="include resolved notes")
+    p_notes.add_argument("--json", action="store_true", help="emit JSON")
+    p_notes.set_defaults(func=_cmd_notes)
+
+    p_remember = sub.add_parser(
+        "remember", parents=[course_parent], help="add a note to the learner model"
+    )
+    p_remember.add_argument("kind", choices=["insight", "misconception_fixed", "open_thread", "material_gap", "goal"])
+    p_remember.add_argument("text", help="one-line summary")
+    p_remember.add_argument("--topic", default="", help="topic tag")
+    p_remember.add_argument("--words", default=None, help="the learner's own words, verbatim")
+    p_remember.add_argument("--source", default=None, help="file[:line] the note refers to")
+    p_remember.set_defaults(func=_cmd_remember)
 
     p_serve = sub.add_parser("serve", help="run the stdio MCP server (for Hermes)")
     p_serve.set_defaults(func=_cmd_serve)

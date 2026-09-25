@@ -28,6 +28,7 @@ from ..ports.repositories import (
     ContentRepository,
     CourseProfileRepository,
     EdgeRepository,
+    LearnerNoteRepository,
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
@@ -40,11 +41,13 @@ from ..storage.memory import (
     InMemoryContentRepository,
     InMemoryCourseProfileRepository,
     InMemoryEdgeRepository,
+    InMemoryLearnerNoteRepository,
     InMemoryLearnerStateRepository,
     InMemoryQuestionRepository,
     InMemoryReviewLogRepository,
     InMemoryTelemetryRepository,
 )
+from .learner_model import LearnerModelService
 from .policies import Clock, SystemClock
 from .service import CurriculumApplicationService
 
@@ -74,6 +77,8 @@ class InMemoryStack:
     profiles: CourseProfileRepository
     content: ContentRepository
     telemetry: TelemetryRepository
+    learner: LearnerModelService | None = None
+    notes: LearnerNoteRepository | None = None
 
 
 def build_in_memory(
@@ -106,8 +111,11 @@ def build_in_memory(
         telemetry=telemetry,
         clock=clock or SystemClock(),
     )
+    notes = InMemoryLearnerNoteRepository()
+    learner = LearnerModelService(notes=notes, scheduler=FsrsScheduler(), clock=clock or SystemClock())
     return InMemoryStack(
-        service, concepts, edges, questions, states, reviews, profiles, content, telemetry
+        service, concepts, edges, questions, states, reviews, profiles, content, telemetry,
+        learner, notes,
     )
 
 
@@ -135,3 +143,14 @@ def build_service(settings: Settings | None = None) -> CurriculumService:
         telemetry=repos.telemetry,
         clock=SystemClock(),
     )
+
+
+def build_learner_service(settings: Settings | None = None) -> LearnerModelService:
+    """Production wiring for dialogue mode: the learner model on Postgres, scheduled
+    by the same FSRS scheduler as the concept graph. Needs schema/003 applied
+    (``curriculum db-migrate``)."""
+    settings = settings or load()
+    from ..storage.postgres import PostgresRepositories, connect
+
+    repos = PostgresRepositories(connect(settings.database_url))
+    return LearnerModelService(notes=repos.learner_notes, scheduler=FsrsScheduler(), clock=SystemClock())

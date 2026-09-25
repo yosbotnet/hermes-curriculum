@@ -35,12 +35,14 @@ from ..domain.entities import (
     ReviewEvent,
 )
 from ..domain.enums import EdgeType
+from ..domain.learner import LearnerNote, NoteKind
 from ..domain.telemetry import EngagementEvent
 from ..ports.repositories import (
     ConceptIndexRepository,
     ContentRepository,
     CourseProfileRepository,
     EdgeRepository,
+    LearnerNoteRepository,
     LearnerStateRepository,
     QuestionRepository,
     ReviewLogRepository,
@@ -358,6 +360,41 @@ class InMemoryTelemetryRepository(TelemetryRepository):
     def list_by_course(self, course: str) -> Sequence[EngagementEvent]:
         # Preserve append order: the log is a course-scoped time series.
         return [e for e in self._events if e.course == course]
+
+
+class InMemoryLearnerNoteRepository(LearnerNoteRepository):
+    """The learner model, keyed by note id. The executable specification the
+    Postgres ``learner_note`` adapter must match: oldest-first listings (ties by
+    id) and due = active reviewable notes with ``due_at <= before``."""
+
+    def __init__(self) -> None:
+        self._notes: dict[str, LearnerNote] = {}
+
+    def get(self, note_id: str) -> LearnerNote | None:
+        return self._notes.get(note_id)
+
+    def upsert(self, note: LearnerNote) -> None:
+        self._notes[note.id] = note
+
+    def list(self, course, *, kinds=None, status=None) -> Sequence[LearnerNote]:
+        wanted = set(kinds) if kinds is not None else None
+        out = [
+            n for n in self._notes.values()
+            if n.course == course
+            and (wanted is None or n.kind in wanted)
+            and (status is None or n.status == status)
+        ]
+        return sorted(out, key=lambda n: (n.created_at, n.id))
+
+    def due(self, course: str, before: datetime) -> Sequence[LearnerNote]:
+        out = [
+            n for n in self._notes.values()
+            if n.course == course and n.reviewable and n.due_at is not None and n.due_at <= before
+        ]
+        return sorted(out, key=lambda n: (n.due_at, n.id))
+
+    def list_courses(self) -> Sequence[str]:
+        return sorted({n.course for n in self._notes.values()})
 
 
 class InMemoryCourseProfileRepository(CourseProfileRepository):
